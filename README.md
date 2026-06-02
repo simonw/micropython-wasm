@@ -700,7 +700,7 @@ skipped, but package/build-script tests still run.
 Current local result:
 
 ```text
-52 passed
+53 passed
 ```
 
 To test a custom artifact manually:

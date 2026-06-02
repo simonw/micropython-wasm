@@ -336,7 +336,7 @@ class MicroPythonSession:
         if self._started:
             self._request_queue.put({"op": "close"})
         if self._thread is not None:
-            self._thread.join(timeout=1.0)
+            self._thread.join()
 
     def __enter__(self) -> MicroPythonSession:
         if self._closed:
@@ -449,23 +449,30 @@ class MicroPythonSession:
         _define_host_call(linker, store, host_functions, Func, FuncType, ValType)
 
         try:
-            module = Module.from_file(engine, str(self.wasm_path))
-            instance = linker.instantiate(store, module)
-            start = instance.exports(store).get("_start")
-            if start is None:
-                raise MicroPythonWasmError("WASI module does not export _start")
-            if not isinstance(start, Func):
-                raise MicroPythonWasmError("WASI module _start export is not callable")
-            start(store)
-        except ExitTrap as exc:
-            if getattr(exc, "code", 0) not in (0, None):
-                raise MicroPythonWasmError(
-                    f"guest exited with code {exc.code}"
-                ) from exc
-        except Trap as exc:
-            raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
-        except WasmtimeError as exc:
-            raise MicroPythonWasmError(f"wasmtime error: {exc}") from exc
+            try:
+                module = Module.from_file(engine, str(self.wasm_path))
+                instance = linker.instantiate(store, module)
+                start = instance.exports(store).get("_start")
+                if start is None:
+                    raise MicroPythonWasmError("WASI module does not export _start")
+                if not isinstance(start, Func):
+                    raise MicroPythonWasmError(
+                        "WASI module _start export is not callable"
+                    )
+                start(store)
+            except ExitTrap as exc:
+                if getattr(exc, "code", 0) not in (0, None):
+                    raise MicroPythonWasmError(
+                        f"guest exited with code {exc.code}"
+                    ) from exc
+            except Trap as exc:
+                raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
+            except WasmtimeError as exc:
+                raise MicroPythonWasmError(f"wasmtime error: {exc}") from exc
+        finally:
+            with self._callback_lock:
+                self._store = None
+                self._thread_host_functions = None
 
     def _session_next(self) -> dict[str, object]:
         request = self._request_queue.get()
@@ -634,6 +641,7 @@ def run_micropython_wasi(
     finally:
         if timer is not None:
             timer.cancel()
+            timer.join()
 
     return RunResult(
         stdout="".join(stdout_parts),
