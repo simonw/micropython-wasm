@@ -114,7 +114,7 @@ class MicroPythonReplaySession:
         self._host_functions: dict[str, Callable[..., object]] = {}
         self._closed = False
         for name, func in (host_functions or {}).items():
-            self.register_function(name, func)
+            self.register_function(func, name=name)
 
     @property
     def closed(self) -> bool:
@@ -130,19 +130,16 @@ class MicroPythonReplaySession:
 
     def register_function(
         self,
-        name_or_func: str | Callable[..., object],
-        func: Callable[..., object] | None = None,
+        func: Callable[..., object],
+        *,
+        name: str | None = None,
     ) -> None:
         if self._closed:
             raise MicroPythonSessionClosed("MicroPythonReplaySession is closed")
 
-        if func is None:
-            if not callable(name_or_func):
-                raise TypeError("register_function() expected a callable")
-            func = name_or_func
-            name = getattr(func, "__name__", "")
-        else:
-            name = str(name_or_func)
+        if not callable(func):
+            raise TypeError("register_function() expected a callable")
+        name = name or getattr(func, "__name__", "")
 
         if not name.isidentifier():
             raise ValueError(
@@ -239,7 +236,7 @@ class MicroPythonSession:
         self._store = None
         self._thread_host_functions: dict[str, Callable[..., object]] | None = None
         for name, func in (host_functions or {}).items():
-            self.register_function(name, func)
+            self.register_function(func, name=name)
 
     @property
     def closed(self) -> bool:
@@ -252,19 +249,16 @@ class MicroPythonSession:
 
     def register_function(
         self,
-        name_or_func: str | Callable[..., object],
-        func: Callable[..., object] | None = None,
+        func: Callable[..., object],
+        *,
+        name: str | None = None,
     ) -> None:
         if self._closed:
             raise MicroPythonSessionClosed("MicroPythonSession is closed")
 
-        if func is None:
-            if not callable(name_or_func):
-                raise TypeError("register_function() expected a callable")
-            func = name_or_func
-            name = getattr(func, "__name__", "")
-        else:
-            name = str(name_or_func)
+        if not callable(func):
+            raise TypeError("register_function() expected a callable")
+        name = name or getattr(func, "__name__", "")
 
         if not name.isidentifier():
             raise ValueError(

@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(
 def test_session_exposes_registered_python_function():
     session = MicroPythonSession(wall_timeout_seconds=None)
     try:
-        session.register_function("add", lambda a, b: a + b)
+        session.register_function(lambda a, b: a + b, name="add")
 
         result = session.run("print(add(2, 3))")
     finally:
@@ -30,6 +30,18 @@ def test_session_can_register_function_from_callable_name_without_with():
     try:
         session.register_function(shout)
         assert session.run("print(shout('hello'))").stdout == "HELLO!\n"
+    finally:
+        session.close()
+
+
+def test_session_can_register_function_with_custom_name():
+    def add(a, b):
+        return a + b
+
+    session = MicroPythonSession(wall_timeout_seconds=None)
+    try:
+        session.register_function(add, name="plus")
+        assert session.run("print(plus(2, 3))").stdout == "5\n"
     finally:
         session.close()
 
@@ -110,7 +122,10 @@ def test_register_function_requires_valid_identifier():
     session = MicroPythonSession(wall_timeout_seconds=None)
 
     with pytest.raises(ValueError):
-        session.register_function("not-valid", lambda: None)
+        session.register_function(lambda: None, name="not-valid")
+
+    with pytest.raises(TypeError):
+        session.register_function("not-callable")
 
 
 def test_raw_host_call_module_is_available_to_micropython():

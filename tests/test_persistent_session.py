@@ -64,7 +64,7 @@ def test_persistent_session_does_not_replay_file_side_effects(tmp_path):
         counter["count"] += 1
         return counter["count"]
 
-    session.register_function("increment", increment)
+    session.register_function(increment)
     try:
         assert session.run("value = increment()\nprint(value)").stdout == "1\n"
         assert session.run("print(value)").stdout == "1\n"

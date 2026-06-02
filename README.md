@@ -20,32 +20,6 @@ MicroPython in a fresh WebAssembly sandbox. It is designed around:
 - No network capability.
 - Configurable WebAssembly memory, fuel, and wall-clock controls.
 
-## Current Status
-
-The repository currently includes a working bundled artifact at:
-
-```text
-micropython_wasm/artifacts/micropython-wasi.wasm
-```
-
-That artifact was built from MicroPython PR `#13676`, using the PR ref
-`pull/13676/head`. MicroPython's WASI Unix variant is still experimental
-upstream, so this package should also be treated as experimental.
-
-The test suite verifies the bundled artifact against arithmetic, strings,
-bytes, collections, comprehensions, functions, closures, recursion, classes,
-exceptions, context managers, a small standard-library subset, fresh instance
-isolation, read-only file access, and fuel interruption. It also verifies both
-stateful session APIs: the transcript-backed `MicroPythonReplaySession` and the
-persistent background-thread `MicroPythonSession`.
-
-One important build caveat: the PR's full post-link Binaryen pipeline currently
-fails here at `wasm-opt --spill-pointers` with Binaryen 130. The artifact in this
-repository uses the successful `wasm-opt --translate-to-exnref` postprocess
-instead. Simple and moderately broad Python execution works under Wasmtime, but
-this should be stress-tested before relying on it for hostile or long-running
-code.
-
 ## Installation
 
 Install from PyPI:
@@ -231,8 +205,8 @@ session = MicroPythonSession(
 Methods and properties:
 
 - `session.run(code)`: run code in the resident VM and return a `RunResult`.
-- `session.register_function(name, func)` or `session.register_function(func)`:
-  expose a Python function to MicroPython code.
+- `session.register_function(func, name=None)`: expose a Python function to
+  MicroPython code, optionally under a custom name.
 - `session.close()`: send a close message to the guest loop and reject further
   runs.
 - `session.closed`: `True` after `close()`.
@@ -336,7 +310,7 @@ def add(a, b):
     return a + b
 
 session = MicroPythonSession()
-session.register_function("add", add)
+session.register_function(add)
 
 result = session.run("print(add(2, 3))")
 print(result.stdout)
@@ -359,6 +333,18 @@ session = MicroPythonSession()
 session.register_function(shout)
 
 print(session.run("print(shout('hello'))").stdout)
+```
+
+To expose a function under a different MicroPython name, pass `name=`:
+
+```python
+def add(a, b):
+    return a + b
+
+session = MicroPythonSession()
+session.register_function(add, name="plus")
+
+print(session.run("print(plus(2, 3))").stdout)
 ```
 
 You can also provide functions when constructing the session:
@@ -714,7 +700,7 @@ skipped, but package/build-script tests still run.
 Current local result:
 
 ```text
-51 passed
+52 passed
 ```
 
 To test a custom artifact manually:
@@ -755,6 +741,32 @@ Additional protections to consider:
 - Bound stdout/stderr capture size if running untrusted code at scale.
 - Avoid host callbacks that expose ambient authority.
 - Keep Wasmtime and the MicroPython artifact pinned and regularly tested.
+
+## Implementation Status and Caveats
+
+The repository currently includes a working bundled artifact at:
+
+```text
+micropython_wasm/artifacts/micropython-wasi.wasm
+```
+
+That artifact was built from MicroPython PR `#13676`, using the PR ref
+`pull/13676/head`. MicroPython's WASI Unix variant is still experimental
+upstream, so this package should also be treated as experimental.
+
+The test suite verifies the bundled artifact against arithmetic, strings,
+bytes, collections, comprehensions, functions, closures, recursion, classes,
+exceptions, context managers, a small standard-library subset, fresh instance
+isolation, read-only file access, and fuel interruption. It also verifies both
+stateful session APIs: the transcript-backed `MicroPythonReplaySession` and the
+persistent background-thread `MicroPythonSession`.
+
+One important build caveat: the PR's full post-link Binaryen pipeline currently
+fails here at `wasm-opt --spill-pointers` with Binaryen 130. The artifact in this
+repository uses the successful `wasm-opt --translate-to-exnref` postprocess
+instead. Simple and moderately broad Python execution works under Wasmtime, but
+this should be stress-tested before relying on it for hostile or long-running
+code.
 
 ## License
 
