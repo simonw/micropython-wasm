@@ -1,0 +1,29 @@
+[project]
+name = "micropython-wasm"
+version = "0.1"
+description = "MicroPython packaged in WASM for wasmtime"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Simon Willison"}]
+license = "Apache-2.0"
+classifiers = []
+dependencies = [
+
+]
+
+[dependency-groups]
+dev = [
+    "pytest"
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+
+[project.urls]
+Homepage = "https://github.com/simonw/micropython-wasm"
+Changelog = "https://github.com/simonw/micropython-wasm/releases"
+Issues = "https://github.com/simonw/micropython-wasm/issues"
+CI = "https://github.com/simonw/micropython-wasm/actions"
+
