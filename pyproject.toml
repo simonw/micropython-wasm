@@ -8,7 +8,7 @@ authors = [{name = "Simon Willison"}]
 license = "Apache-2.0"
 classifiers = []
 dependencies = [
-
+    "wasmtime",
 ]
 
 [dependency-groups]
@@ -20,10 +20,12 @@ dev = [
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+micropython_wasm = ["artifacts/*.wasm", "py.typed", "usercmodule/host/*"]
+
 
 [project.urls]
 Homepage = "https://github.com/simonw/micropython-wasm"
 Changelog = "https://github.com/simonw/micropython-wasm/releases"
 Issues = "https://github.com/simonw/micropython-wasm/issues"
 CI = "https://github.com/simonw/micropython-wasm/actions"
-
