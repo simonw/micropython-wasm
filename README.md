@@ -13,7 +13,8 @@ MicroPython in a fresh WebAssembly sandbox. It is designed around:
 
 - A custom MicroPython WASI artifact, not the Emscripten browser/Node build.
 - The official `wasmtime` Python package.
-- A fresh Wasmtime instance for every execution.
+- A fresh Wasmtime instance for one-shot execution, plus an optional persistent
+  session API backed by a background thread.
 - No host filesystem access unless an explicit read-only directory is
   preopened.
 - No network capability.
@@ -31,13 +32,12 @@ That artifact was built from MicroPython PR `#13676`, using the PR ref
 `pull/13676/head`. MicroPython's WASI Unix variant is still experimental
 upstream, so this package should also be treated as experimental.
 
-The bundled artifact has been verified by the test suite against arithmetic,
-strings, bytes, collections, comprehensions, functions, closures, recursion,
-classes, exceptions, context managers, a small standard-library subset, fresh
-instance isolation, read-only file access, and fuel interruption. It also
-verifies both stateful session APIs: the transcript-backed
-`MicroPythonReplaySession` and the persistent background-thread
-`MicroPythonSession`.
+The test suite verifies the bundled artifact against arithmetic, strings,
+bytes, collections, comprehensions, functions, closures, recursion, classes,
+exceptions, context managers, a small standard-library subset, fresh instance
+isolation, read-only file access, and fuel interruption. It also verifies both
+stateful session APIs: the transcript-backed `MicroPythonReplaySession` and the
+persistent background-thread `MicroPythonSession`.
 
 One important build caveat: the PR's full post-link Binaryen pipeline currently
 fails here at `wasm-opt --spill-pointers` with Binaryen 130. The artifact in this
@@ -196,8 +196,8 @@ next code snippet. Each snippet is executed with `exec(..., globals())` in the
 same MicroPython VM, so variables, imports, functions, classes, and live objects
 really stay resident between calls.
 
-This avoids the replay behavior of `MicroPythonReplaySession`. Side effects
-from a previous snippet are not repeated by later snippets:
+Because the VM stays alive, side effects from a previous snippet are not
+repeated by later snippets:
 
 ```python
 from micropython_wasm import MicroPythonSession
@@ -245,13 +245,16 @@ discarded.
 
 ### `MicroPythonReplaySession(...)`
 
-Create a transcript-backed session object. This provides a similar user-facing
-API to `MicroPythonSession`, but it reconstructs state by replaying
-previous successful snippets before each new snippet:
+Create a transcript-backed session object with the same basic `run()` and
+`close()` shape as `MicroPythonSession`, but without keeping a MicroPython VM
+running in a background thread.
 
 `MicroPythonReplaySession` does not run a background thread and does not keep a
 live MicroPython VM between calls. Each `run()` call executes a fresh Wasmtime
-instance and returns when that one command-style execution finishes.
+instance and returns when that one command-style execution finishes. To preserve
+variables, functions, classes, and imports from the caller's point of view, it
+reconstructs state by replaying previous successful snippets before each new
+snippet.
 
 ```python
 from micropython_wasm import MicroPythonReplaySession
@@ -308,18 +311,17 @@ except MicroPythonWasmError:
 print(session.run("print(x)").stdout)  # "1\n"
 ```
 
-The current implementation is transcript-backed. The WASI artifact exposes a
-command-style `_start` entry point, not an incremental `eval` export, so each
-`session.run()` call creates a fresh guest instance, replays previous successful
-snippets, emits an internal marker, then runs the new snippet and returns only
-the output after that marker. This preserves ordinary Python state from the
-caller's point of view, including variables, functions, classes, and imports,
-but previous snippets are re-executed internally on every call.
+For `MicroPythonReplaySession`, each `session.run()` call creates a fresh guest
+instance, replays previous successful snippets, emits an internal marker, then
+runs the new snippet and returns only the output after that marker. This
+preserves ordinary Python state from the caller's point of view, including
+variables, functions, classes, and imports, but previous snippets are
+re-executed internally on every call.
 
 That replay behavior matters if previous snippets perform side effects such as
 writing files, making time-dependent calculations, consuming randomness, or
-mutating external host state. A future custom MicroPython artifact with an
-incremental eval export could replace this with true in-VM persistence.
+mutating external host state. Use `MicroPythonSession` when you want true
+resident in-VM persistence.
 
 ### Host Functions
 
@@ -542,7 +544,7 @@ MicroPython is not CPython. It implements a substantial subset of Python, but
 there are differences in syntax support, standard-library coverage, object
 behavior, and platform details.
 
-The current test suite verifies useful behavior including:
+The test suite verifies useful behavior including:
 
 - Arithmetic and big integers.
 - Strings and bytes.
