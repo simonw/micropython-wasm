@@ -170,26 +170,6 @@ next code snippet. Each snippet is executed with `exec(..., globals())` in the
 same MicroPython VM, so variables, imports, functions, classes, and live objects
 really stay resident between calls.
 
-Because the VM stays alive, side effects from a previous snippet are not
-repeated by later snippets:
-
-```python
-from micropython_wasm import MicroPythonSession
-
-calls = []
-
-def record(value):
-    calls.append(value)
-    return len(calls)
-
-session = MicroPythonSession(host_functions={"record": record})
-session.run("count = record('once')")
-session.run("print(count)")
-session.close()
-
-print(calls)  # ["once"]
-```
-
 `MicroPythonSession` accepts the same resource, filesystem, and host
 function arguments as `run()`:
 
@@ -296,6 +276,27 @@ That replay behavior matters if previous snippets perform side effects such as
 writing files, making time-dependent calculations, consuming randomness, or
 mutating external host state. Use `MicroPythonSession` when you want true
 resident in-VM persistence.
+
+For example, this calls the Python `record()` function again during the second
+`session.run()`, because the first snippet is replayed before `print(count)` is
+executed:
+
+```python
+from micropython_wasm import MicroPythonReplaySession
+
+calls = []
+
+def record(value):
+    calls.append(value)
+    return len(calls)
+
+session = MicroPythonReplaySession(host_functions={"record": record})
+session.run("count = record('once')")
+session.run("print(count)")
+session.close()
+
+print(calls)  # ["once", "once"]
+```
 
 ### Host Functions
 
