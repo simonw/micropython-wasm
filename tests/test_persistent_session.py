@@ -148,5 +148,9 @@ def test_persistent_session_wall_timeout_interrupts_infinite_loop():
     try:
         with pytest.raises(MicroPythonWasmError, match="guest trapped"):
             session.run("while True:\n    pass")
+        assert session._thread_error is not None
+        assert session._thread_error.__traceback__ is None
+        assert session._thread_error.__cause__ is None
+        assert session._thread_error.__context__ is None
     finally:
         session.close()

@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
+DEFAULT_HOST_RESULT_BYTES = 256 * 1024
+DEFAULT_FUEL = 20_000_000
+
 __all__ = [
     "MicroPythonWasmError",
     "MicroPythonWasmArtifactNotFound",
@@ -97,10 +100,11 @@ class MicroPythonReplaySession:
         wasm_path: str | Path | None = None,
         *,
         memory_bytes: int = 16 * 1024 * 1024,
-        fuel: int = 5_000_000,
+        fuel: int = DEFAULT_FUEL,
         wall_timeout_seconds: Optional[float] = 1.0,
         readonly_dir: str | Path | None = None,
         host_functions: Mapping[str, Callable[..., object]] | None = None,
+        host_result_bytes: int = DEFAULT_HOST_RESULT_BYTES,
     ) -> None:
         self.wasm_path = (
             Path(wasm_path) if wasm_path is not None else default_wasm_path()
@@ -109,6 +113,7 @@ class MicroPythonReplaySession:
         self.fuel = fuel
         self.wall_timeout_seconds = wall_timeout_seconds
         self.readonly_dir = readonly_dir
+        self.host_result_bytes = host_result_bytes
         self._snippets: list[str] = []
         self._preamble: list[str] = []
         self._host_functions: dict[str, Callable[..., object]] = {}
@@ -170,6 +175,7 @@ class MicroPythonReplaySession:
             wall_timeout_seconds=self.wall_timeout_seconds,
             readonly_dir=self.readonly_dir,
             host_functions=self._host_functions,
+            host_result_bytes=self.host_result_bytes,
         )
         marker_with_newline = marker + "\n"
         if marker_with_newline not in result.stdout:
@@ -208,10 +214,11 @@ class MicroPythonSession:
         wasm_path: str | Path | None = None,
         *,
         memory_bytes: int = 16 * 1024 * 1024,
-        fuel: int = 5_000_000,
+        fuel: int = DEFAULT_FUEL,
         wall_timeout_seconds: Optional[float] = None,
         readonly_dir: str | Path | None = None,
         host_functions: Mapping[str, Callable[..., object]] | None = None,
+        host_result_bytes: int = DEFAULT_HOST_RESULT_BYTES,
     ) -> None:
         self.wasm_path = (
             Path(wasm_path) if wasm_path is not None else default_wasm_path()
@@ -220,6 +227,7 @@ class MicroPythonSession:
         self.fuel = fuel
         self.wall_timeout_seconds = wall_timeout_seconds
         self.readonly_dir = readonly_dir
+        self.host_result_bytes = host_result_bytes
         self._host_functions: dict[str, Callable[..., object]] = {}
         self._pending_preamble: list[str] = []
         self._closed = False
@@ -365,6 +373,9 @@ class MicroPythonSession:
         try:
             self._run_bootstrap()
         except BaseException as exc:
+            exc.__traceback__ = None
+            exc.__cause__ = None
+            exc.__context__ = None
             self._thread_error = exc
 
     def _run_bootstrap(self) -> None:
@@ -392,6 +403,7 @@ class MicroPythonSession:
             self.memory_bytes,
             self.fuel,
             self.wall_timeout_seconds,
+            self.host_result_bytes,
         )
 
         cfg = Config()
@@ -451,7 +463,15 @@ class MicroPythonSession:
         with self._callback_lock:
             host_functions.update(self._host_functions)
             self._thread_host_functions = host_functions
-        _define_host_call(linker, store, host_functions, Func, FuncType, ValType)
+        _define_host_call(
+            linker,
+            store,
+            host_functions,
+            self.host_result_bytes,
+            Func,
+            FuncType,
+            ValType,
+        )
 
         try:
             try:
@@ -543,10 +563,11 @@ def run(
     wasm_path: str | Path | None = None,
     *,
     memory_bytes: int = 16 * 1024 * 1024,
-    fuel: int = 5_000_000,
+    fuel: int = DEFAULT_FUEL,
     wall_timeout_seconds: Optional[float] = 1.0,
     readonly_dir: str | Path | None = None,
     host_functions: Mapping[str, Callable[..., object]] | None = None,
+    host_result_bytes: int = DEFAULT_HOST_RESULT_BYTES,
 ) -> RunResult:
     """Run MicroPython code in a fresh WASI WebAssembly instance."""
 
@@ -558,6 +579,7 @@ def run(
         wall_timeout_seconds=wall_timeout_seconds,
         readonly_dir=readonly_dir,
         host_functions=host_functions,
+        host_result_bytes=host_result_bytes,
     )
 
 
@@ -566,10 +588,11 @@ def run_micropython_wasi(
     wasm_path: str | Path,
     *,
     memory_bytes: int = 16 * 1024 * 1024,
-    fuel: int = 5_000_000,
+    fuel: int = DEFAULT_FUEL,
     wall_timeout_seconds: Optional[float] = 1.0,
     readonly_dir: str | Path | None = None,
     host_functions: Mapping[str, Callable[..., object]] | None = None,
+    host_result_bytes: int = DEFAULT_HOST_RESULT_BYTES,
 ) -> RunResult:
     """
     Run code through a WASI MicroPython command module.
@@ -580,7 +603,9 @@ def run_micropython_wasi(
     """
 
     wasm_path = Path(wasm_path)
-    _validate_execution_options(wasm_path, memory_bytes, fuel, wall_timeout_seconds)
+    _validate_execution_options(
+        wasm_path, memory_bytes, fuel, wall_timeout_seconds, host_result_bytes
+    )
 
     try:
         from wasmtime import (
@@ -643,7 +668,13 @@ def run_micropython_wasi(
     linker = Linker(engine)
     linker.define_wasi()
     _define_host_call(
-        linker, store, dict(host_functions or {}), Func, FuncType, ValType
+        linker,
+        store,
+        dict(host_functions or {}),
+        host_result_bytes,
+        Func,
+        FuncType,
+        ValType,
     )
 
     timer: threading.Timer | None = None
@@ -685,6 +716,7 @@ def _validate_execution_options(
     memory_bytes: int,
     fuel: int,
     wall_timeout_seconds: Optional[float],
+    host_result_bytes: int,
 ) -> None:
     if not wasm_path.exists():
         raise MicroPythonWasmArtifactNotFound(
@@ -701,6 +733,10 @@ def _validate_execution_options(
         raise ValueError("fuel must be greater than zero")
     if wall_timeout_seconds is not None and wall_timeout_seconds <= 0:
         raise ValueError("wall_timeout_seconds must be greater than zero or None")
+    if host_result_bytes <= 0:
+        raise ValueError("host_result_bytes must be greater than zero")
+    if host_result_bytes > 2_147_483_647:
+        raise ValueError("host_result_bytes must fit in a WebAssembly i32")
 
 
 def _configure_readonly_dir(wasi, readonly_dir: str | Path | None, error_cls) -> None:
@@ -723,7 +759,13 @@ def _configure_readonly_dir(wasi, readonly_dir: str | Path | None, error_cls) ->
 
 
 def _define_host_call(
-    linker, store, host_functions, func_cls, func_type_cls, val_type_cls
+    linker,
+    store,
+    host_functions,
+    host_result_bytes,
+    func_cls,
+    func_type_cls,
+    val_type_cls,
 ) -> None:
     def host_call(
         caller,
@@ -789,4 +831,11 @@ def _define_host_call(
         "micropython_wasm",
         "host_call",
         func_cls(store, ty, host_call, access_caller=True),
+    )
+    cap_ty = func_type_cls([], [val_type_cls.i32()])
+    linker.define(
+        store,
+        "micropython_wasm",
+        "host_result_cap",
+        func_cls(store, cap_ty, lambda: host_result_bytes),
     )

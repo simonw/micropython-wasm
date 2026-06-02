@@ -4,7 +4,7 @@ from typing import Callable, cast
 
 import pytest
 
-from micropython_wasm import MicroPythonSession, default_wasm_path, run
+from micropython_wasm import MicroPythonSession, MicroPythonWasmError, default_wasm_path, run
 
 pytestmark = pytest.mark.skipif(
     not default_wasm_path().exists(),
@@ -87,6 +87,51 @@ print(",".join(data["tags"]))
         session.close()
 
     assert result.stdout == "4\n8\nhost,python\n"
+
+
+def test_run_host_function_allows_256k_results_by_default():
+    result = run(
+        """
+import host
+print(len(host.call("large", '{"args": [], "kwargs": {}}')))
+""",
+        host_functions={"large": lambda: "x" * (128 * 1024)},
+        wall_timeout_seconds=None,
+    )
+
+    assert result.stdout == "131094\n"
+
+
+def test_run_host_result_bytes_can_lower_result_limit():
+    result = run(
+        """
+import host
+try:
+    host.call("large", '{"args": [], "kwargs": {}}')
+except ValueError as ex:
+    print(str(ex))
+""",
+        host_functions={"large": lambda: "x" * 2048},
+        host_result_bytes=1024,
+        wall_timeout_seconds=None,
+    )
+
+    assert result.stdout == "host callback result too large\n"
+
+
+def test_session_host_result_bytes_can_lower_result_limit():
+    session = MicroPythonSession(
+        host_functions={"large": lambda: "x" * 2048},
+        host_result_bytes=1024,
+        wall_timeout_seconds=None,
+    )
+    try:
+        with pytest.raises(
+            MicroPythonWasmError, match="ValueError: host callback result too large"
+        ):
+            session.run("large()")
+    finally:
+        session.close()
 
 
 def test_session_host_function_result_can_be_used_as_session_state():

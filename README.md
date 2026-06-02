@@ -112,8 +112,9 @@ from micropython_wasm import run
 result = run(
     "print(sum(range(10)))",
     memory_bytes=16 * 1024 * 1024,
-    fuel=5_000_000,
+    fuel=20_000_000,
     wall_timeout_seconds=1.0,
+    host_result_bytes=256 * 1024,
 )
 ```
 
@@ -130,6 +131,8 @@ Arguments:
   `/input`, with read-only WASI directory and file permissions.
 - `host_functions`: optional mapping of host function names to Python callables.
   This enables the low-level `host.call(name, payload_json)` bridge.
+- `host_result_bytes`: maximum serialized host callback response size. The
+  default is `256 * 1024`.
 
 ### `run_micropython_wasi(code, wasm_path, ...)`
 
@@ -176,9 +179,10 @@ function arguments as `run()`:
 ```python
 session = MicroPythonSession(
     memory_bytes=16 * 1024 * 1024,
-    fuel=5_000_000,
+    fuel=20_000_000,
     readonly_dir="fixtures",
     host_functions={"add": lambda a, b: a + b},
+    host_result_bytes=256 * 1024,
 )
 ```
 
@@ -234,9 +238,10 @@ session.close()
 ```python
 session = MicroPythonReplaySession(
     memory_bytes=16 * 1024 * 1024,
-    fuel=5_000_000,
+    fuel=20_000_000,
     wall_timeout_seconds=1.0,
     readonly_dir="fixtures",
+    host_result_bytes=256 * 1024,
 )
 ```
 
