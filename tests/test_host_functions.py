@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable, cast
+
 import pytest
 
 from micropython_wasm import MicroPythonSession, default_wasm_path, run
@@ -125,7 +127,7 @@ def test_register_function_requires_valid_identifier():
         session.register_function(lambda: None, name="not-valid")
 
     with pytest.raises(TypeError):
-        session.register_function("not-callable")
+        session.register_function(cast(Callable[..., object], "not-callable"))
 
 
 def test_raw_host_call_module_is_available_to_micropython():

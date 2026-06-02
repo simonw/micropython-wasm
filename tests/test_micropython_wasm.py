@@ -16,6 +16,7 @@ from micropython_wasm import (
 def load_build_script():
     script_path = Path(__file__).parents[1] / "scripts" / "build_micropython_wasi.py"
     spec = importlib.util.spec_from_file_location("build_micropython_wasi", script_path)
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

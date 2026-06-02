@@ -439,7 +439,7 @@ class MicroPythonSession:
 
         linker = Linker(engine)
         linker.define_wasi()
-        host_functions = {
+        host_functions: dict[str, Callable[..., object]] = {
             "__session_next__": self._session_next,
             "__session_result__": self._session_result,
         }
@@ -454,6 +454,8 @@ class MicroPythonSession:
             start = instance.exports(store).get("_start")
             if start is None:
                 raise MicroPythonWasmError("WASI module does not export _start")
+            if not isinstance(start, Func):
+                raise MicroPythonWasmError("WASI module _start export is not callable")
             start(store)
         except ExitTrap as exc:
             if getattr(exc, "code", 0) not in (0, None):
@@ -619,6 +621,8 @@ def run_micropython_wasi(
         start = instance.exports(store).get("_start")
         if start is None:
             raise MicroPythonWasmError("WASI module does not export _start")
+        if not isinstance(start, Func):
+            raise MicroPythonWasmError("WASI module _start export is not callable")
         start(store)
     except ExitTrap as exc:
         if getattr(exc, "code", 0) not in (0, None):
