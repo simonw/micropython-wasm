@@ -34,8 +34,10 @@ upstream, so this package should also be treated as experimental.
 The bundled artifact has been verified by the test suite against arithmetic,
 strings, bytes, collections, comprehensions, functions, closures, recursion,
 classes, exceptions, context managers, a small standard-library subset, fresh
-instance isolation, read-only file access, and fuel interruption.
-It also verifies the transcript-backed `MicroPythonSession` API.
+instance isolation, read-only file access, and fuel interruption. It also
+verifies both stateful session APIs: the transcript-backed
+`MicroPythonReplaySession` and the persistent background-thread
+`MicroPythonSession`.
 
 One important build caveat: the PR's full post-link Binaryen pipeline currently
 fails here at `wasm-opt --spill-pointers` with Binaryen 130. The artifact in this
@@ -90,7 +92,8 @@ print(result.fuel_remaining)  # integer Wasmtime fuel count
 Each call creates a new engine, store, WASI config, module instance, and
 MicroPython process. Globals and imports do not persist between calls.
 
-For stateful usage, use `MicroPythonSession`:
+For stateful usage with real resident MicroPython state, use
+`MicroPythonSession`:
 
 ```python
 from micropython_wasm import MicroPythonSession
@@ -172,13 +175,88 @@ copying it into the package.
 
 ### `MicroPythonSession(...)`
 
-Create an object that preserves variables, functions, classes, and imports
-between calls:
+Create a persistent MicroPython VM running in a background Python thread:
 
 ```python
 from micropython_wasm import MicroPythonSession
 
 session = MicroPythonSession()
+
+session.run("x = 10")
+session.run("x += 5")
+result = session.run("print(x)")
+print(result.stdout)
+
+session.close()
+```
+
+`MicroPythonSession` starts lazily on the first `run()`. A bootstrap loop
+runs inside MicroPython and repeatedly calls back to the Python host for the
+next code snippet. Each snippet is executed with `exec(..., globals())` in the
+same MicroPython VM, so variables, imports, functions, classes, and live objects
+really stay resident between calls.
+
+This avoids the replay behavior of `MicroPythonReplaySession`. Side effects
+from a previous snippet are not repeated by later snippets:
+
+```python
+from micropython_wasm import MicroPythonSession
+
+calls = []
+
+def record(value):
+    calls.append(value)
+    return len(calls)
+
+session = MicroPythonSession(host_functions={"record": record})
+session.run("count = record('once')")
+session.run("print(count)")
+session.close()
+
+print(calls)  # ["once"]
+```
+
+`MicroPythonSession` accepts the same resource, filesystem, and host
+function arguments as `run()`:
+
+```python
+session = MicroPythonSession(
+    memory_bytes=16 * 1024 * 1024,
+    fuel=5_000_000,
+    readonly_dir="fixtures",
+    host_functions={"add": lambda a, b: a + b},
+)
+```
+
+Methods and properties:
+
+- `session.run(code)`: run code in the resident VM and return a `RunResult`.
+- `session.register_function(name, func)` or `session.register_function(func)`:
+  expose a Python function to MicroPython code.
+- `session.close()`: send a close message to the guest loop and reject further
+  runs.
+- `session.closed`: `True` after `close()`.
+- `session.host_functions`: copy of registered host functions.
+- Context manager support: `with MicroPythonSession() as session: ...`.
+
+Fuel is refreshed for each `session.run()` request. If a snippet exhausts fuel
+or otherwise traps the guest, the background VM stops and the session should be
+discarded.
+
+### `MicroPythonReplaySession(...)`
+
+Create a transcript-backed session object. This provides a similar user-facing
+API to `MicroPythonSession`, but it reconstructs state by replaying
+previous successful snippets before each new snippet:
+
+`MicroPythonReplaySession` does not run a background thread and does not keep a
+live MicroPython VM between calls. Each `run()` call executes a fresh Wasmtime
+instance and returns when that one command-style execution finishes.
+
+```python
+from micropython_wasm import MicroPythonReplaySession
+
+session = MicroPythonReplaySession()
 
 session.run("""
 import math
@@ -193,11 +271,11 @@ print(result.stdout)
 session.close()
 ```
 
-`MicroPythonSession` accepts the same resource and filesystem arguments as
+`MicroPythonReplaySession` accepts the same resource and filesystem arguments as
 `run()`:
 
 ```python
-session = MicroPythonSession(
+session = MicroPythonReplaySession(
     memory_bytes=16 * 1024 * 1024,
     fuel=5_000_000,
     wall_timeout_seconds=1.0,
@@ -211,15 +289,15 @@ Methods and properties:
 - `session.close()`: clear the transcript and reject further runs.
 - `session.closed`: `True` after `close()`.
 - `session.snippets`: tuple of successful snippets currently retained.
-- Context manager support: `with MicroPythonSession() as session: ...`.
+- Context manager support: `with MicroPythonReplaySession() as session: ...`.
 
 Only successful snippets are retained. If a snippet exits nonzero or traps, it
 is not added to the session transcript:
 
 ```python
-from micropython_wasm import MicroPythonSession, MicroPythonWasmError
+from micropython_wasm import MicroPythonReplaySession, MicroPythonWasmError
 
-session = MicroPythonSession()
+session = MicroPythonReplaySession()
 session.run("x = 1")
 
 try:
@@ -245,8 +323,9 @@ incremental eval export could replace this with true in-VM persistence.
 
 ### Host Functions
 
-`MicroPythonSession` can expose regular Python functions to MicroPython code.
-Register a function, then call it by name inside the guest:
+`MicroPythonSession` and `MicroPythonReplaySession` can expose regular Python
+functions to MicroPython code. Register a function, then call it by name inside
+the guest:
 
 ```python
 from micropython_wasm import MicroPythonSession
@@ -475,8 +554,9 @@ The current test suite verifies useful behavior including:
 - `try`/`except`/`finally` and context managers.
 - `math`, `json`, `re`, `binascii`, `sys`, and `os.listdir('/input')`.
 - Fresh execution state between calls.
-- Transcript-backed session state across `MicroPythonSession.run()` calls.
-- Host function callbacks through `MicroPythonSession.register_function()`.
+- Transcript-backed session state across `MicroPythonReplaySession.run()` calls.
+- True resident VM state across `MicroPythonSession.run()` calls.
+- Host function callbacks through session `register_function()` methods.
 - Read-only file preopens.
 - Fuel exhaustion.
 
@@ -632,7 +712,7 @@ skipped, but package/build-script tests still run.
 Current local result:
 
 ```text
-44 passed
+51 passed
 ```
 
 To test a custom artifact manually:
