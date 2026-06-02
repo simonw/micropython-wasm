@@ -1,6 +1,6 @@
 [project]
 name = "micropython-wasm"
-version = "0.1a0"
+version = "0.1a1"
 description = "MicroPython packaged in WASM for wasmtime"
 readme = "README.md"
 requires-python = ">=3.10"
