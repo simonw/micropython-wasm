@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from micropython_wasm import (
+    MicroPythonSession,
     MicroPythonWasmArtifactNotFound,
     default_wasm_path,
     run,
@@ -42,6 +43,28 @@ def test_run_executes_packaged_artifact_when_available():
 
     assert result.stdout == "2\n"
     assert result.stderr == ""
+
+
+def test_run_preserves_unicode_stdout():
+    if not default_wasm_path().exists():
+        pytest.skip("packaged MicroPython WASI artifact is not built")
+
+    result = run('print("🦆? No - 🐦‍⬛? No - 🐤?")')
+
+    assert result.stdout == "🦆? No - 🐦‍⬛? No - 🐤?\n"
+
+
+def test_session_preserves_unicode_stdout():
+    if not default_wasm_path().exists():
+        pytest.skip("packaged MicroPython WASI artifact is not built")
+
+    session = MicroPythonSession(wall_timeout_seconds=1.0)
+    try:
+        result = session.run('print("🦆? No - 🐦‍⬛? No - 🐤?")')
+    finally:
+        session.close()
+
+    assert result.stdout == "🦆? No - 🐦‍⬛? No - 🐤?\n"
 
 
 def test_run_micropython_wasi_validates_resource_limits_before_wasmtime(tmp_path):

@@ -231,9 +231,11 @@ class MicroPythonSession:
         self._run_lock = threading.Lock()
         self._callback_lock = threading.RLock()
         self._current_request_id: str | None = None
-        self._stdout_parts: list[str] = []
-        self._stderr_parts: list[str] = []
+        self._stdout_parts: list[bytes] = []
+        self._stderr_parts: list[bytes] = []
+        self._engine = None
         self._store = None
+        self._timeout_timer: threading.Timer | None = None
         self._thread_host_functions: dict[str, Callable[..., object]] | None = None
         for name, func in (host_functions or {}).items():
             self.register_function(func, name=name)
@@ -309,8 +311,8 @@ class MicroPythonSession:
                     break
 
             with self._callback_lock:
-                stdout = "".join(self._stdout_parts)
-                stderr = "".join(self._stderr_parts)
+                stdout = b"".join(self._stdout_parts).decode("utf-8", "replace")
+                stderr = b"".join(self._stderr_parts).decode("utf-8", "replace")
                 self._current_request_id = None
 
             fuel_remaining = -1
@@ -400,6 +402,7 @@ class MicroPythonSession:
 
         engine = Engine(cfg)
         store = Store(engine)
+        self._engine = engine
         self._store = store
         store.set_limits(
             memory_size=self.memory_bytes,
@@ -409,25 +412,27 @@ class MicroPythonSession:
             table_elements=10_000,
         )
         store.set_fuel(self.fuel)
+        if self.wall_timeout_seconds is not None:
+            store.set_epoch_deadline(1)
 
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
+        stdout_parts: list[bytes] = []
+        stderr_parts: list[bytes] = []
 
         def capture_stdout(data: bytes) -> None:
-            text = bytes(data).decode("utf-8", "replace")
+            data = bytes(data)
             with self._callback_lock:
                 if self._current_request_id is None:
-                    stdout_parts.append(text)
+                    stdout_parts.append(data)
                 else:
-                    self._stdout_parts.append(text)
+                    self._stdout_parts.append(data)
 
         def capture_stderr(data: bytes) -> None:
-            text = bytes(data).decode("utf-8", "replace")
+            data = bytes(data)
             with self._callback_lock:
                 if self._current_request_id is None:
-                    stderr_parts.append(text)
+                    stderr_parts.append(data)
                 else:
-                    self._stderr_parts.append(text)
+                    self._stderr_parts.append(data)
 
         wasi = WasiConfig()
         wasi.argv = ["micropython", "-c", _THREAD_BOOTSTRAP]
@@ -470,7 +475,9 @@ class MicroPythonSession:
             except WasmtimeError as exc:
                 raise MicroPythonWasmError(f"wasmtime error: {exc}") from exc
         finally:
+            self._cancel_wall_timeout_timer()
             with self._callback_lock:
+                self._engine = None
                 self._store = None
                 self._thread_host_functions = None
 
@@ -478,11 +485,34 @@ class MicroPythonSession:
         request = self._request_queue.get()
         if request.get("op") == "run" and self._store is not None:
             self._store.set_fuel(self.fuel)
+            if self.wall_timeout_seconds is not None:
+                self._store.set_epoch_deadline(1)
+                self._start_wall_timeout_timer()
         return request
 
     def _session_result(self, result: dict[str, object]) -> None:
+        self._cancel_wall_timeout_timer()
         self._result_queue.put(result)
         return None
+
+    def _start_wall_timeout_timer(self) -> None:
+        self._cancel_wall_timeout_timer()
+        if self._engine is None or self.wall_timeout_seconds is None:
+            return
+
+        timer = threading.Timer(self.wall_timeout_seconds, self._engine.increment_epoch)
+        timer.daemon = True
+        timer.start()
+        self._timeout_timer = timer
+
+    def _cancel_wall_timeout_timer(self) -> None:
+        timer = self._timeout_timer
+        self._timeout_timer = None
+        if timer is None:
+            return
+        timer.cancel()
+        if timer is not threading.current_thread():
+            timer.join()
 
 
 def _marker_code(marker: str) -> str:
@@ -591,14 +621,14 @@ def run_micropython_wasi(
     if wall_timeout_seconds is not None:
         store.set_epoch_deadline(1)
 
-    stdout_parts: list[str] = []
-    stderr_parts: list[str] = []
+    stdout_parts: list[bytes] = []
+    stderr_parts: list[bytes] = []
 
     def capture_stdout(data: bytes) -> None:
-        stdout_parts.append(bytes(data).decode("utf-8", "replace"))
+        stdout_parts.append(bytes(data))
 
     def capture_stderr(data: bytes) -> None:
-        stderr_parts.append(bytes(data).decode("utf-8", "replace"))
+        stderr_parts.append(bytes(data))
 
     wasi = WasiConfig()
     wasi.argv = ["micropython", "-c", code]
@@ -644,8 +674,8 @@ def run_micropython_wasi(
             timer.join()
 
     return RunResult(
-        stdout="".join(stdout_parts),
-        stderr="".join(stderr_parts),
+        stdout=b"".join(stdout_parts).decode("utf-8", "replace"),
+        stderr=b"".join(stderr_parts).decode("utf-8", "replace"),
         fuel_remaining=store.get_fuel(),
     )
 
@@ -725,13 +755,16 @@ def _define_host_call(
             response = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
         try:
-            response_bytes = json.dumps(response, separators=(",", ":")).encode("utf-8")
+            response_bytes = json.dumps(
+                response, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
         except Exception as exc:
             response_bytes = json.dumps(
                 {
                     "ok": False,
                     "error": f"{type(exc).__name__}: host result is not JSON serializable",
                 },
+                ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
 

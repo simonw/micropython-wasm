@@ -132,3 +132,21 @@ def test_persistent_session_close_releases_thread_resources():
     assert not session._thread.is_alive()
     assert session._store is None
     assert session._thread_host_functions is None
+
+
+def test_persistent_session_wall_timeout_allows_successful_runs():
+    session = MicroPythonSession(wall_timeout_seconds=0.5)
+    try:
+        assert session.run("print(1)").stdout == "1\n"
+        assert session.run("print(2)").stdout == "2\n"
+    finally:
+        session.close()
+
+
+def test_persistent_session_wall_timeout_interrupts_infinite_loop():
+    session = MicroPythonSession(wall_timeout_seconds=0.05)
+    try:
+        with pytest.raises(MicroPythonWasmError, match="guest trapped"):
+            session.run("while True:\n    pass")
+    finally:
+        session.close()
