@@ -8,7 +8,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-
 DEFAULT_REPO_URL = "https://github.com/micropython/micropython.git"
 DEFAULT_WORK_DIR = Path("/tmp/micropython-wasm-build")
 DEFAULT_OUTPUT = (
@@ -17,14 +16,18 @@ DEFAULT_OUTPUT = (
     / "artifacts"
     / "micropython-wasi.wasm"
 )
-DEFAULT_USER_C_MODULES = Path(__file__).resolve().parents[1] / "micropython_wasm" / "usercmodule"
+DEFAULT_USER_C_MODULES = (
+    Path(__file__).resolve().parents[1] / "micropython_wasm" / "usercmodule"
+)
 
 
 class BuildError(RuntimeError):
     pass
 
 
-def run_command(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+def run_command(
+    command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None
+) -> None:
     subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
@@ -67,7 +70,9 @@ def build_micropython(
     if user_c_modules is not None:
         unix_make_args.append(f"USER_C_MODULES={user_c_modules}")
 
-    run_command(["make", "-C", str(repo_dir / "ports" / "unix"), "submodules", *unix_make_args])
+    run_command(
+        ["make", "-C", str(repo_dir / "ports" / "unix"), "submodules", *unix_make_args]
+    )
     unix_dir = repo_dir / "ports" / "unix"
     try:
         run_command(

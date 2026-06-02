@@ -4,7 +4,6 @@ import pytest
 
 from micropython_wasm import MicroPythonWasmError, default_wasm_path, run
 
-
 pytestmark = pytest.mark.skipif(
     not default_wasm_path().exists(),
     reason="packaged MicroPython WASI artifact is not built",
@@ -231,14 +230,12 @@ def test_standard_library_subset(code, expected):
 
 def test_instances_are_fresh_between_runs():
     assert run_stdout("x = 42\nprint(x)") == "42\n"
-    assert run_stdout(
-        """
+    assert run_stdout("""
 try:
     print(x)
 except NameError:
     print("missing")
-"""
-    ) == "missing\n"
+""") == "missing\n"
 
 
 def test_readonly_preopened_directory_allows_reading(tmp_path):
@@ -274,5 +271,7 @@ def test_low_fuel_interrupts_infinite_loop():
 
 
 def test_uncaught_guest_exception_is_reported_as_guest_failure():
-    with pytest.raises(MicroPythonWasmError, match="guest exited with code 1|guest trapped"):
+    with pytest.raises(
+        MicroPythonWasmError, match="guest exited with code 1|guest trapped"
+    ):
         run('raise ValueError("boom")', wall_timeout_seconds=None)

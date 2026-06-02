@@ -4,7 +4,6 @@ import pytest
 
 from micropython_wasm import MicroPythonSession, default_wasm_path, run
 
-
 pytestmark = pytest.mark.skipif(
     not default_wasm_path().exists(),
     reason="packaged MicroPython WASI artifact is not built",
@@ -47,7 +46,9 @@ def test_session_exposes_host_function_with_kwargs():
         wall_timeout_seconds=None,
     )
     try:
-        result = session.run("print(format_name('Ada', last='Lovelace', uppercase=True))")
+        result = session.run(
+            "print(format_name('Ada', last='Lovelace', uppercase=True))"
+        )
     finally:
         session.close()
 
@@ -58,16 +59,16 @@ def test_session_host_function_can_return_json_values():
     def describe(value):
         return {"value": value, "doubled": value * 2, "tags": ["host", "python"]}
 
-    session = MicroPythonSession(host_functions={"describe": describe}, wall_timeout_seconds=None)
+    session = MicroPythonSession(
+        host_functions={"describe": describe}, wall_timeout_seconds=None
+    )
     try:
-        result = session.run(
-            """
+        result = session.run("""
 data = describe(4)
 print(data["value"])
 print(data["doubled"])
 print(",".join(data["tags"]))
-"""
-        )
+""")
     finally:
         session.close()
 
@@ -75,7 +76,9 @@ print(",".join(data["tags"]))
 
 
 def test_session_host_function_result_can_be_used_as_session_state():
-    session = MicroPythonSession(host_functions={"add": lambda a, b: a + b}, wall_timeout_seconds=None)
+    session = MicroPythonSession(
+        host_functions={"add": lambda a, b: a + b}, wall_timeout_seconds=None
+    )
     try:
         assert session.run("total = add(10, 5)\nprint(total)").stdout == "15\n"
         assert session.run("print(total * 2)").stdout == "30\n"
@@ -83,21 +86,20 @@ def test_session_host_function_result_can_be_used_as_session_state():
         session.close()
 
 
-
 def test_session_host_function_exception_can_be_caught_in_micropython():
     def fail():
         raise ValueError("bad host value")
 
-    session = MicroPythonSession(host_functions={"fail": fail}, wall_timeout_seconds=None)
+    session = MicroPythonSession(
+        host_functions={"fail": fail}, wall_timeout_seconds=None
+    )
     try:
-        result = session.run(
-            """
+        result = session.run("""
 try:
     fail()
 except RuntimeError as ex:
     print(str(ex))
-"""
-        )
+""")
     finally:
         session.close()
 
@@ -120,4 +122,4 @@ print(host.call("missing", "{}"))
         wall_timeout_seconds=None,
     )
 
-    assert result.stdout == "{\"ok\":false,\"error\":\"KeyError: 'missing'\"}\n"
+    assert result.stdout == '{"ok":false,"error":"KeyError: \'missing\'"}\n'

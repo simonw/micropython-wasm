@@ -9,7 +9,6 @@ from micropython_wasm import (
     default_wasm_path,
 )
 
-
 pytestmark = pytest.mark.skipif(
     not default_wasm_path().exists(),
     reason="packaged MicroPython WASI artifact is not built",
@@ -31,8 +30,7 @@ def test_session_keeps_variables_between_runs():
 def test_session_keeps_functions_classes_and_imports():
     session = MicroPythonReplaySession(wall_timeout_seconds=None)
 
-    session.run(
-        """
+    session.run("""
 import math
 
 def scale(value):
@@ -44,8 +42,7 @@ class Box:
 
     def scaled(self):
         return scale(self.value)
-"""
-    )
+""")
 
     result = session.run("box = Box(81)\nprint(box.scaled())")
 
@@ -76,7 +73,9 @@ def test_session_supports_readonly_directory(tmp_path):
     (tmp_path / "message.txt").write_text("hello\n")
     session = MicroPythonReplaySession(readonly_dir=tmp_path, wall_timeout_seconds=None)
 
-    result = session.run("contents = open('/input/message.txt').read()\nprint(contents)")
+    result = session.run(
+        "contents = open('/input/message.txt').read()\nprint(contents)"
+    )
     later = session.run("print(contents.upper())")
 
     assert result.stdout == "hello\n\n"

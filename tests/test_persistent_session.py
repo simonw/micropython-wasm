@@ -9,7 +9,6 @@ from micropython_wasm import (
     default_wasm_path,
 )
 
-
 pytestmark = pytest.mark.skipif(
     not default_wasm_path().exists(),
     reason="packaged MicroPython WASI artifact is not built",
@@ -38,8 +37,7 @@ def test_persistent_session_keeps_real_resident_state_without_replay():
 def test_persistent_session_keeps_functions_classes_and_imports():
     session = MicroPythonSession()
     try:
-        session.run(
-            """
+        session.run("""
 import math
 
 def scale(value):
@@ -51,8 +49,7 @@ class Box:
 
     def scaled(self):
         return scale(self.value)
-"""
-        )
+""")
 
         assert session.run("box = Box(81)\nprint(box.scaled())").stdout == "90.0\n"
     finally:
@@ -95,14 +92,12 @@ def test_persistent_session_host_function_exception_can_be_caught():
 
     session = MicroPythonSession(host_functions={"fail": fail})
     try:
-        result = session.run(
-            """
+        result = session.run("""
 try:
     fail()
 except RuntimeError as ex:
     print(str(ex))
-"""
-        )
+""")
     finally:
         session.close()
 

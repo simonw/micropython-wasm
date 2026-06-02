@@ -102,7 +102,9 @@ class MicroPythonReplaySession:
         readonly_dir: str | Path | None = None,
         host_functions: Mapping[str, Callable[..., object]] | None = None,
     ) -> None:
-        self.wasm_path = Path(wasm_path) if wasm_path is not None else default_wasm_path()
+        self.wasm_path = (
+            Path(wasm_path) if wasm_path is not None else default_wasm_path()
+        )
         self.memory_bytes = memory_bytes
         self.fuel = fuel
         self.wall_timeout_seconds = wall_timeout_seconds
@@ -143,12 +145,16 @@ class MicroPythonReplaySession:
             name = str(name_or_func)
 
         if not name.isidentifier():
-            raise ValueError(f"host function name is not a valid Python identifier: {name!r}")
+            raise ValueError(
+                f"host function name is not a valid Python identifier: {name!r}"
+            )
 
         self._host_functions[name] = func
         wrapper = _host_function_wrapper_code(name)
         self._preamble = [
-            preamble for preamble in self._preamble if not preamble.startswith(f"# host:{name}\n")
+            preamble
+            for preamble in self._preamble
+            if not preamble.startswith(f"# host:{name}\n")
         ]
         self._preamble.append(wrapper)
 
@@ -210,7 +216,9 @@ class MicroPythonSession:
         readonly_dir: str | Path | None = None,
         host_functions: Mapping[str, Callable[..., object]] | None = None,
     ) -> None:
-        self.wasm_path = Path(wasm_path) if wasm_path is not None else default_wasm_path()
+        self.wasm_path = (
+            Path(wasm_path) if wasm_path is not None else default_wasm_path()
+        )
         self.memory_bytes = memory_bytes
         self.fuel = fuel
         self.wall_timeout_seconds = wall_timeout_seconds
@@ -259,7 +267,9 @@ class MicroPythonSession:
             name = str(name_or_func)
 
         if not name.isidentifier():
-            raise ValueError(f"host function name is not a valid Python identifier: {name!r}")
+            raise ValueError(
+                f"host function name is not a valid Python identifier: {name!r}"
+            )
 
         wrapper = _host_function_wrapper_code(name)
         with self._callback_lock:
@@ -317,9 +327,13 @@ class MicroPythonSession:
                     fuel_remaining = -1
 
             if not result.get("ok"):
-                raise MicroPythonWasmError(str(result.get("error", "guest execution failed")))
+                raise MicroPythonWasmError(
+                    str(result.get("error", "guest execution failed"))
+                )
 
-            return RunResult(stdout=stdout, stderr=stderr, fuel_remaining=fuel_remaining)
+            return RunResult(
+                stdout=stdout, stderr=stderr, fuel_remaining=fuel_remaining
+            )
 
     def close(self) -> None:
         if self._closed:
@@ -347,7 +361,9 @@ class MicroPythonSession:
 
     def _raise_thread_error_if_any(self) -> None:
         if self._thread_error is not None:
-            raise MicroPythonWasmError(f"MicroPythonSession stopped: {self._thread_error}")
+            raise MicroPythonWasmError(
+                f"MicroPythonSession stopped: {self._thread_error}"
+            )
 
     def _thread_main(self) -> None:
         try:
@@ -357,9 +373,20 @@ class MicroPythonSession:
 
     def _run_bootstrap(self) -> None:
         try:
-            from wasmtime import Config, Engine, ExitTrap, Func, FuncType, Linker, Module, Store
+            from wasmtime import (
+                Config,
+                Engine,
+                ExitTrap,
+                Func,
+                FuncType,
+                Linker,
+                Module,
+                Store,
+            )
             from wasmtime import Trap, ValType, WasiConfig, WasmtimeError
-        except ImportError as exc:  # pragma: no cover - dependency metadata should install it
+        except (
+            ImportError
+        ) as exc:  # pragma: no cover - dependency metadata should install it
             raise MicroPythonWasmError(
                 "The wasmtime package is required. Install micropython-wasm with dependencies."
             ) from exc
@@ -436,7 +463,9 @@ class MicroPythonSession:
             start(store)
         except ExitTrap as exc:
             if getattr(exc, "code", 0) not in (0, None):
-                raise MicroPythonWasmError(f"guest exited with code {exc.code}") from exc
+                raise MicroPythonWasmError(
+                    f"guest exited with code {exc.code}"
+                ) from exc
         except Trap as exc:
             raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
         except WasmtimeError as exc:
@@ -451,7 +480,6 @@ class MicroPythonSession:
     def _session_result(self, result: dict[str, object]) -> None:
         self._result_queue.put(result)
         return None
-
 
 
 def _marker_code(marker: str) -> str:
@@ -522,9 +550,20 @@ def run_micropython_wasi(
     _validate_execution_options(wasm_path, memory_bytes, fuel, wall_timeout_seconds)
 
     try:
-        from wasmtime import Config, Engine, ExitTrap, Func, FuncType, Linker, Module, Store
+        from wasmtime import (
+            Config,
+            Engine,
+            ExitTrap,
+            Func,
+            FuncType,
+            Linker,
+            Module,
+            Store,
+        )
         from wasmtime import Trap, ValType, WasiConfig, WasmtimeError
-    except ImportError as exc:  # pragma: no cover - dependency metadata should install it
+    except (
+        ImportError
+    ) as exc:  # pragma: no cover - dependency metadata should install it
         raise MicroPythonWasmError(
             "The wasmtime package is required. Install micropython-wasm with dependencies."
         ) from exc
@@ -570,7 +609,9 @@ def run_micropython_wasi(
 
     linker = Linker(engine)
     linker.define_wasi()
-    _define_host_call(linker, store, dict(host_functions or {}), Func, FuncType, ValType)
+    _define_host_call(
+        linker, store, dict(host_functions or {}), Func, FuncType, ValType
+    )
 
     timer: threading.Timer | None = None
     if wall_timeout_seconds is not None:
@@ -615,7 +656,9 @@ def _validate_execution_options(
             "Build it with scripts/build_micropython_wasi.py or pass wasm_path."
         )
     if not wasm_path.is_file():
-        raise MicroPythonWasmError(f"MicroPython WASI artifact is not a file: {wasm_path}")
+        raise MicroPythonWasmError(
+            f"MicroPython WASI artifact is not a file: {wasm_path}"
+        )
     if memory_bytes <= 0:
         raise ValueError("memory_bytes must be greater than zero")
     if fuel <= 0:
@@ -643,7 +686,9 @@ def _configure_readonly_dir(wasi, readonly_dir: str | Path | None, error_cls) ->
         )
 
 
-def _define_host_call(linker, store, host_functions, func_cls, func_type_cls, val_type_cls) -> None:
+def _define_host_call(
+    linker, store, host_functions, func_cls, func_type_cls, val_type_cls
+) -> None:
     def host_call(
         caller,
         name_ptr: int,
@@ -658,10 +703,12 @@ def _define_host_call(linker, store, host_functions, func_cls, func_type_cls, va
             return -1
 
         try:
-            name = bytes(memory.read(caller, name_ptr, name_ptr + name_len)).decode("utf-8")
-            payload = bytes(memory.read(caller, payload_ptr, payload_ptr + payload_len)).decode(
+            name = bytes(memory.read(caller, name_ptr, name_ptr + name_len)).decode(
                 "utf-8"
             )
+            payload = bytes(
+                memory.read(caller, payload_ptr, payload_ptr + payload_len)
+            ).decode("utf-8")
             request = json.loads(payload)
             args = request.get("args", [])
             kwargs = request.get("kwargs", {})
