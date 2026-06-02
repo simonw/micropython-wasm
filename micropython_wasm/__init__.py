@@ -373,6 +373,9 @@ class MicroPythonSession:
         try:
             self._run_bootstrap()
         except BaseException as exc:
+            exc.__traceback__ = None
+            exc.__cause__ = None
+            exc.__context__ = None
             self._thread_error = exc
 
     def _run_bootstrap(self) -> None:
