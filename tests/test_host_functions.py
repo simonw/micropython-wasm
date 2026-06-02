@@ -13,9 +13,12 @@ pytestmark = pytest.mark.skipif(
 
 def test_session_exposes_registered_python_function():
     session = MicroPythonSession(wall_timeout_seconds=None)
-    session.register_function("add", lambda a, b: a + b)
+    try:
+        session.register_function("add", lambda a, b: a + b)
 
-    result = session.run("print(add(2, 3))")
+        result = session.run("print(add(2, 3))")
+    finally:
+        session.close()
 
     assert result.stdout == "5\n"
 
@@ -25,10 +28,11 @@ def test_session_can_register_function_from_callable_name_without_with():
         return value.upper() + "!"
 
     session = MicroPythonSession(wall_timeout_seconds=None)
-    session.register_function(shout)
-
-    assert session.run("print(shout('hello'))").stdout == "HELLO!\n"
-    session.close()
+    try:
+        session.register_function(shout)
+        assert session.run("print(shout('hello'))").stdout == "HELLO!\n"
+    finally:
+        session.close()
 
 
 def test_session_exposes_host_function_with_kwargs():
@@ -42,8 +46,10 @@ def test_session_exposes_host_function_with_kwargs():
         host_functions={"format_name": format_name},
         wall_timeout_seconds=None,
     )
-
-    result = session.run("print(format_name('Ada', last='Lovelace', uppercase=True))")
+    try:
+        result = session.run("print(format_name('Ada', last='Lovelace', uppercase=True))")
+    finally:
+        session.close()
 
     assert result.stdout == "ADA LOVELACE\n"
 
@@ -53,24 +59,29 @@ def test_session_host_function_can_return_json_values():
         return {"value": value, "doubled": value * 2, "tags": ["host", "python"]}
 
     session = MicroPythonSession(host_functions={"describe": describe}, wall_timeout_seconds=None)
-
-    result = session.run(
-        """
+    try:
+        result = session.run(
+            """
 data = describe(4)
 print(data["value"])
 print(data["doubled"])
 print(",".join(data["tags"]))
 """
-    )
+        )
+    finally:
+        session.close()
 
     assert result.stdout == "4\n8\nhost,python\n"
 
 
 def test_session_host_function_result_can_be_used_as_session_state():
     session = MicroPythonSession(host_functions={"add": lambda a, b: a + b}, wall_timeout_seconds=None)
+    try:
+        assert session.run("total = add(10, 5)\nprint(total)").stdout == "15\n"
+        assert session.run("print(total * 2)").stdout == "30\n"
+    finally:
+        session.close()
 
-    assert session.run("total = add(10, 5)\nprint(total)").stdout == "15\n"
-    assert session.run("print(total * 2)").stdout == "30\n"
 
 
 def test_session_host_function_exception_can_be_caught_in_micropython():
@@ -78,15 +89,17 @@ def test_session_host_function_exception_can_be_caught_in_micropython():
         raise ValueError("bad host value")
 
     session = MicroPythonSession(host_functions={"fail": fail}, wall_timeout_seconds=None)
-
-    result = session.run(
-        """
+    try:
+        result = session.run(
+            """
 try:
     fail()
 except RuntimeError as ex:
     print(str(ex))
 """
-    )
+        )
+    finally:
+        session.close()
 
     assert result.stdout == "ValueError: bad host value\n"
 

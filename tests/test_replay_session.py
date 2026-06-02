@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from micropython_wasm import (
-    MicroPythonSession,
+    MicroPythonReplaySession,
     MicroPythonSessionClosed,
     MicroPythonWasmError,
     default_wasm_path,
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_session_keeps_variables_between_runs():
-    session = MicroPythonSession(wall_timeout_seconds=None)
+    session = MicroPythonReplaySession(wall_timeout_seconds=None)
 
     first = session.run("x = 10\nprint(x)")
     second = session.run("x += 5\nprint(x)")
@@ -29,7 +29,7 @@ def test_session_keeps_variables_between_runs():
 
 
 def test_session_keeps_functions_classes_and_imports():
-    session = MicroPythonSession(wall_timeout_seconds=None)
+    session = MicroPythonReplaySession(wall_timeout_seconds=None)
 
     session.run(
         """
@@ -53,7 +53,7 @@ class Box:
 
 
 def test_session_returns_only_output_from_current_run():
-    session = MicroPythonSession(wall_timeout_seconds=None)
+    session = MicroPythonReplaySession(wall_timeout_seconds=None)
 
     first = session.run("print('first')\nvalue = 3")
     second = session.run("print('second')\nprint(value)")
@@ -63,7 +63,7 @@ def test_session_returns_only_output_from_current_run():
 
 
 def test_session_does_not_save_failed_snippet():
-    session = MicroPythonSession(wall_timeout_seconds=None)
+    session = MicroPythonReplaySession(wall_timeout_seconds=None)
     session.run("x = 1")
 
     with pytest.raises(MicroPythonWasmError):
@@ -74,7 +74,7 @@ def test_session_does_not_save_failed_snippet():
 
 def test_session_supports_readonly_directory(tmp_path):
     (tmp_path / "message.txt").write_text("hello\n")
-    session = MicroPythonSession(readonly_dir=tmp_path, wall_timeout_seconds=None)
+    session = MicroPythonReplaySession(readonly_dir=tmp_path, wall_timeout_seconds=None)
 
     result = session.run("contents = open('/input/message.txt').read()\nprint(contents)")
     later = session.run("print(contents.upper())")
@@ -84,7 +84,7 @@ def test_session_supports_readonly_directory(tmp_path):
 
 
 def test_session_close_clears_state_and_rejects_more_runs():
-    session = MicroPythonSession(wall_timeout_seconds=None)
+    session = MicroPythonReplaySession(wall_timeout_seconds=None)
     session.run("x = 1")
 
     session.close()
@@ -96,7 +96,7 @@ def test_session_close_clears_state_and_rejects_more_runs():
 
 
 def test_session_context_manager_closes_session():
-    with MicroPythonSession(wall_timeout_seconds=None) as session:
+    with MicroPythonReplaySession(wall_timeout_seconds=None) as session:
         assert session.run("x = 4\nprint(x)").stdout == "4\n"
 
     assert session.closed
