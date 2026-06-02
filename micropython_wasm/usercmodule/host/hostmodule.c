@@ -1,10 +1,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "py/mpstate.h"
 #include "py/objstr.h"
 #include "py/runtime.h"
 
-#define HOST_RESULT_CAP (64 * 1024)
+#define DEFAULT_HOST_RESULT_CAP (256 * 1024)
+
+__attribute__((import_module("micropython_wasm"), import_name("host_result_cap")))
+extern int32_t micropython_wasm_host_result_cap(void);
 
 __attribute__((import_module("micropython_wasm"), import_name("host_call")))
 extern int32_t micropython_wasm_host_call(
@@ -21,7 +25,21 @@ static mp_obj_t host_call(mp_obj_t name_obj, mp_obj_t payload_obj) {
     size_t payload_len;
     const char *name = mp_obj_str_get_data(name_obj, &name_len);
     const char *payload = mp_obj_str_get_data(payload_obj, &payload_len);
-    char *result = m_new(char, HOST_RESULT_CAP);
+    int32_t result_cap = micropython_wasm_host_result_cap();
+    if (result_cap <= 0) {
+        result_cap = DEFAULT_HOST_RESULT_CAP;
+    }
+    char *result = MP_STATE_VM(host_result_buffer);
+    if ((size_t)result_cap > MP_STATE_VM(host_result_buffer_cap)) {
+        result = m_renew(
+            char,
+            result,
+            MP_STATE_VM(host_result_buffer_cap),
+            (size_t)result_cap
+            );
+        MP_STATE_VM(host_result_buffer) = result;
+        MP_STATE_VM(host_result_buffer_cap) = (size_t)result_cap;
+    }
 
     int32_t result_len = micropython_wasm_host_call(
         name,
@@ -29,20 +47,17 @@ static mp_obj_t host_call(mp_obj_t name_obj, mp_obj_t payload_obj) {
         payload,
         payload_len,
         result,
-        HOST_RESULT_CAP
+        (size_t)result_cap
         );
 
     if (result_len < 0) {
-        m_del(char, result, HOST_RESULT_CAP);
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("host callback failed"));
     }
-    if ((size_t)result_len > HOST_RESULT_CAP) {
-        m_del(char, result, HOST_RESULT_CAP);
+    if ((size_t)result_len > (size_t)result_cap) {
         mp_raise_msg(&mp_type_ValueError, MP_ERROR_TEXT("host callback result too large"));
     }
 
     mp_obj_t out = mp_obj_new_str(result, (size_t)result_len);
-    m_del(char, result, HOST_RESULT_CAP);
     return out;
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(host_call_obj, host_call);
@@ -59,3 +74,5 @@ const mp_obj_module_t host_user_cmodule = {
 };
 
 MP_REGISTER_MODULE(MP_QSTR_host, host_user_cmodule);
+MP_REGISTER_ROOT_POINTER(char *host_result_buffer);
+MP_REGISTER_ROOT_POINTER(size_t host_result_buffer_cap);

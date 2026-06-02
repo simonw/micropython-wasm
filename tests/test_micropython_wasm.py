@@ -80,6 +80,9 @@ def test_run_micropython_wasi_validates_resource_limits_before_wasmtime(tmp_path
     with pytest.raises(ValueError, match="wall_timeout_seconds"):
         run_micropython_wasi("print(1)", wasm_path, wall_timeout_seconds=0)
 
+    with pytest.raises(ValueError, match="host_result_bytes"):
+        run_micropython_wasi("print(1)", wasm_path, host_result_bytes=0)
+
 
 def test_build_script_finds_and_copies_unix_wasi_artifact(tmp_path):
     build_script = load_build_script()
