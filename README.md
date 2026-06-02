@@ -703,12 +703,6 @@ The suite includes package tests and runtime integration tests against the
 bundled wasm artifact. If the artifact is missing, runtime integration tests are
 skipped, but package/build-script tests still run.
 
-Current local result:
-
-```text
-53 passed
-```
-
 To test a custom artifact manually:
 
 ```bash
