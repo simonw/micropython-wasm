@@ -20,8 +20,11 @@ dev = [
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.package-data]
-micropython_wasm = ["artifacts/*.wasm", "py.typed", "usercmodule/host/*"]
+micropython_wasm = ["artifacts/*.wasm", "py.typed"]
 
 
 [project.urls]

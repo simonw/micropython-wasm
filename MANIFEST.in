@@ -1,0 +1,2 @@
+include scripts/build_micropython_wasi.py
+recursive-include micropython_wasm/usercmodule *.c *.mk
