@@ -120,3 +120,15 @@ def test_persistent_session_close_is_idempotent():
 
     with pytest.raises(MicroPythonSessionClosed):
         session.run("print(1)")
+
+
+def test_persistent_session_close_releases_thread_resources():
+    session = MicroPythonSession()
+    session.run("print(1)")
+
+    session.close()
+
+    assert session._thread is not None
+    assert not session._thread.is_alive()
+    assert session._store is None
+    assert session._thread_host_functions is None
