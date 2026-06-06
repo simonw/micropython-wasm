@@ -239,7 +239,7 @@ except NameError:
 
 
 def test_readonly_preopened_directory_allows_reading(tmp_path):
-    (tmp_path / "hello.txt").write_text("hello from wasi\n")
+    (tmp_path / "hello.txt").write_text("hello from wasi\n", newline="\n")
 
     assert (
         run_stdout(
@@ -255,7 +255,7 @@ print(open("/input/hello.txt").read())
 
 
 def test_readonly_preopened_directory_rejects_writes(tmp_path):
-    (tmp_path / "hello.txt").write_text("hello from wasi\n")
+    (tmp_path / "hello.txt").write_text("hello from wasi\n", newline="\n")
 
     with pytest.raises(MicroPythonWasmError, match="guest exited with code 1"):
         run(
