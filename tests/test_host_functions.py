@@ -4,7 +4,12 @@ from typing import Callable, cast
 
 import pytest
 
-from micropython_wasm import MicroPythonSession, MicroPythonWasmError, default_wasm_path, run
+from micropython_wasm import (
+    MicroPythonSession,
+    MicroPythonWasmError,
+    default_wasm_path,
+    run,
+)
 
 pytestmark = pytest.mark.skipif(
     not default_wasm_path().exists(),

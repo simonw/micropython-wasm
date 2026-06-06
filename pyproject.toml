@@ -32,3 +32,6 @@ Homepage = "https://github.com/simonw/micropython-wasm"
 Changelog = "https://github.com/simonw/micropython-wasm/releases"
 Issues = "https://github.com/simonw/micropython-wasm/issues"
 CI = "https://github.com/simonw/micropython-wasm/actions"
+
+[project.scripts]
+micropython-wasm = "micropython_wasm.cli:main"

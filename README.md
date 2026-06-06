@@ -33,10 +33,32 @@ For local development, use `uv`:
 ```bash
 git clone https://github.com/simonw/micropython-wasm
 cd micropython-wasm
-uv sync --dev
+uv run pytest
 ```
 
 ## Quick Start
+
+You can run MicroPython in WASM from the command line:
+
+```bash
+micropython-wasm -c "print(1 + 1)"
+micropython-wasm script.py
+micropython-wasm
+```
+You can also `micropython-wasm` without installing it first using `uvx`:
+```bash
+uvx micropython-wasm --help
+```
+
+The no-argument form starts a simple REPL with persistent state between
+prompts. Use `--memory` to set the WebAssembly memory limit in bytes and
+`--fuel` to set the Wasmtime fuel budget:
+
+```bash
+micropython-wasm --memory 33554432 --fuel 20000000 -c "print('hello')"
+```
+
+To use it in Python import code from the `micropython_wasm` package:
 
 ```python
 from micropython_wasm import run
