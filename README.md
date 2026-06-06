@@ -8,6 +8,8 @@
 MicroPython packaged as a WASI WebAssembly module and executed from Python
 using Wasmtime.
 
+See [Running Python code in a sandbox with MicroPython and WASM](https://simonwillison.net/2026/Jun/6/micropython-in-a-sandbox/) for background on this project.
+
 This project is an experimental Python package for running small snippets of
 MicroPython in a fresh WebAssembly sandbox. It is designed around:
 
