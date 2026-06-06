@@ -70,7 +70,7 @@ def test_session_does_not_save_failed_snippet():
 
 
 def test_session_supports_readonly_directory(tmp_path):
-    (tmp_path / "message.txt").write_text("hello\n")
+    (tmp_path / "message.txt").write_text("hello\n", newline="\n")
     session = MicroPythonReplaySession(readonly_dir=tmp_path, wall_timeout_seconds=None)
 
     result = session.run(
