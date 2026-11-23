@@ -53,7 +53,7 @@ uvx micropython-wasm --help
 ```
 
 The no-argument form starts a simple REPL with persistent state between
-prompts. Use `--memory` to set the WebAssembly memory limit in bytes and
+prompts. Each line entered gets 10 seconds of wall-clock time. Use `--memory` to set the WebAssembly memory limit in bytes and
 `--fuel` to set the Wasmtime fuel budget:
 
 ```bash
@@ -149,8 +149,9 @@ Arguments:
   `micropython_wasm/artifacts/micropython-wasi.wasm` is used.
 - `memory_bytes`: maximum WebAssembly linear memory for the store.
 - `fuel`: Wasmtime fuel budget. Guest execution traps when it runs out.
-- `wall_timeout_seconds`: wall-clock timeout. Pass `None` to disable epoch
-  interruption.
+- `wall_timeout_seconds`: wall-clock timeout, 1 second by default. It covers
+  time the guest spends blocked in `time.sleep()` or `select.poll()` as well as
+  time spent executing. Pass `None` to disable it.
 - `readonly_dir`: optional host directory to expose inside the guest as
   `/input`, with read-only WASI directory and file permissions.
 - `host_functions`: optional mapping of host function names to Python callables.
@@ -204,6 +205,7 @@ function arguments as `run()`:
 session = MicroPythonSession(
     memory_bytes=16 * 1024 * 1024,
     fuel=35_000_000,
+    wall_timeout_seconds=10.0,
     readonly_dir="fixtures",
     host_functions={"add": lambda a, b: a + b},
     host_result_bytes=256 * 1024,
@@ -221,9 +223,15 @@ Methods and properties:
 - `session.host_functions`: copy of registered host functions.
 - Context manager support: `with MicroPythonSession() as session: ...`.
 
-Fuel is refreshed for each `session.run()` request. If a snippet exhausts fuel
-or otherwise traps the guest, the background VM stops and the session should be
-discarded.
+Fuel and the wall-clock timeout are refreshed for each `session.run()` request.
+The session default for `wall_timeout_seconds` is 10 seconds per request, where
+`run()` defaults to 1 second. Pass `None` to disable it. If a snippet exhausts
+fuel, runs past the timeout, or otherwise traps the guest, the background VM
+stops and the session should be discarded.
+
+`session.close()` also wakes a guest that is blocked in `time.sleep()`, so
+closing a session from another thread does not wait for the sleep to finish. A
+`session.run()` call that was in flight raises `MicroPythonWasmError`.
 
 Guest code that exits the VM, for example with `sys.exit()` or
 `raise SystemExit`, also ends the session. That `session.run()` call and any
@@ -530,6 +538,8 @@ The host configures these Wasmtime controls for each execution:
 - `Store.set_limits(memory_size=...)` limits WebAssembly linear memory.
 - `Store.set_fuel(...)` limits CPU-like instruction progress.
 - Epoch interruption is enabled when `wall_timeout_seconds` is not `None`.
+- WASI `poll_oneoff`, which `time.sleep()` and `select.poll()` are built on, is
+  replaced with a host implementation that stops at the wall-clock deadline.
 - `Config.max_wasm_stack` is set to `512 * 1024`.
 
 Example:
@@ -546,6 +556,11 @@ try:
 except MicroPythonWasmError as ex:
     print("stopped:", ex)
 ```
+
+Fuel is not consumed while the guest is blocked, so the wall-clock timeout is
+the only limit on sleeping. With `wall_timeout_seconds=None` a guest can call
+`time.sleep()` for as long as it likes and the call into this package will not
+return until it wakes.
 
 `memory_bytes` limits guest linear memory, not total host process RSS. Wasmtime
 runtime memory, compiled code, Python process memory, and host callbacks are

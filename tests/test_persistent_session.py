@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
 from micropython_wasm import (
+    DEFAULT_SESSION_WALL_TIMEOUT_SECONDS,
     MicroPythonSessionClosed,
     MicroPythonSession,
     MicroPythonWasmError,
@@ -399,3 +401,65 @@ def test_persistent_session_wall_timeout_interrupts_infinite_loop():
         assert session._thread_error.__context__ is None
     finally:
         session.close()
+
+
+def test_persistent_session_has_a_wall_timeout_by_default():
+    session = MicroPythonSession()
+    try:
+        assert session.wall_timeout_seconds == DEFAULT_SESSION_WALL_TIMEOUT_SECONDS
+        assert DEFAULT_SESSION_WALL_TIMEOUT_SECONDS > 0
+        assert session.run("print(1)").stdout == "1\n"
+    finally:
+        session.close()
+
+
+def test_persistent_session_wall_timeout_interrupts_sleeping_guest():
+    # See test_wall_timeout_interrupts_blocking_guest for why this is 30.
+    session = MicroPythonSession(wall_timeout_seconds=0.5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(
+            MicroPythonWasmError, match="guest trapped: wall-clock timeout exceeded"
+        ):
+            session.run("import time\ntime.sleep(30)")
+    finally:
+        session.close()
+
+    assert time.monotonic() - started < 15
+
+
+def test_persistent_session_sleep_within_wall_timeout_keeps_state():
+    session = MicroPythonSession(wall_timeout_seconds=30)
+    try:
+        session.run("import time\nx = 7\ntime.sleep(0.2)")
+        # Each run gets a fresh deadline, so earlier sleeps do not count.
+        session.run("time.sleep(0.2)")
+        assert session.run("print(x + 1)").stdout == "8\n"
+    finally:
+        session.close()
+
+
+def test_persistent_session_close_wakes_sleeping_guest():
+    session = MicroPythonSession(wall_timeout_seconds=None)
+    session.run("import time")
+    outcome = {}
+
+    def target():
+        try:
+            session.run("time.sleep(30)")
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    runner = threading.Thread(target=target, daemon=True)
+    runner.start()
+    time.sleep(0.5)
+
+    started = time.monotonic()
+    session.close()
+    runner.join(15)
+
+    assert time.monotonic() - started < 15
+    assert not runner.is_alive()
+    assert isinstance(outcome["error"], MicroPythonWasmError)
+    assert session._thread is not None
+    assert not session._thread.is_alive()

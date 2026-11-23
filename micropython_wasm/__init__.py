@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import queue
+import struct
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,8 +12,11 @@ from typing import Callable, Mapping, NoReturn, Optional
 
 DEFAULT_HOST_RESULT_BYTES = 256 * 1024
 DEFAULT_FUEL = 35_000_000
+DEFAULT_SESSION_WALL_TIMEOUT_SECONDS = 10.0
 
 __all__ = [
+    "DEFAULT_FUEL",
+    "DEFAULT_SESSION_WALL_TIMEOUT_SECONDS",
     "MicroPythonWasmError",
     "MicroPythonWasmArtifactNotFound",
     "MicroPythonSession",
@@ -92,6 +97,68 @@ class _SessionTerminated(BaseException):
     It derives from BaseException so the host callback bridge does not turn it
     into an error value for the guest. Wasmtime converts it into a trap.
     """
+
+
+class _WallTimeoutExceeded(BaseException):
+    """
+    Raised inside a blocking host call when the wall-clock deadline passes.
+
+    Like _SessionTerminated it derives from BaseException so that Wasmtime
+    turns it into a trap instead of handing the guest an error to catch.
+    """
+
+
+class _WallClock:
+    """
+    Wall-clock deadline for the guest code currently running.
+
+    Epoch interruption only stops WebAssembly code. A guest that blocks inside
+    the host, which is what time.sleep() does through WASI poll_oneoff, would
+    otherwise sit there unaffected by the wall timeout and by fuel. Blocking
+    host calls sleep through this object instead, so they end at the deadline
+    and can be woken early by interrupt().
+    """
+
+    # Sleeps this short go to time.sleep(), which is more precise than waiting
+    # on an Event. MicroPython builds some sleeps out of 500 microsecond polls.
+    _PRECISE_SLEEP_SECONDS = 0.05
+    _MAX_WAIT_SECONDS = min(threading.TIMEOUT_MAX, 3600.0)
+
+    def __init__(self) -> None:
+        self._deadline: float | None = None
+        self._interrupted = threading.Event()
+
+    def start(self, seconds: Optional[float]) -> None:
+        self._deadline = None if seconds is None else time.monotonic() + seconds
+
+    def stop(self) -> None:
+        self._deadline = None
+
+    def interrupt(self) -> None:
+        """Permanently wake current and future sleeps, trapping the guest."""
+
+        self._interrupted.set()
+
+    def sleep(self, seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while True:
+            if self._interrupted.is_set():
+                raise _SessionTerminated("session closed while the guest was blocked")
+            now = time.monotonic()
+            deadline = self._deadline
+            if deadline is not None and now >= deadline:
+                raise _WallTimeoutExceeded(
+                    "wall-clock timeout exceeded while the guest was blocked"
+                )
+            remaining = end - now
+            if remaining <= 0:
+                return
+            if deadline is not None:
+                remaining = min(remaining, deadline - now)
+            if remaining <= self._PRECISE_SLEEP_SECONDS:
+                time.sleep(remaining)
+            else:
+                self._interrupted.wait(min(remaining, self._MAX_WAIT_SECONDS))
 
 
 class MicroPythonReplaySession:
@@ -224,7 +291,7 @@ class MicroPythonSession:
         *,
         memory_bytes: int = 16 * 1024 * 1024,
         fuel: int = DEFAULT_FUEL,
-        wall_timeout_seconds: Optional[float] = None,
+        wall_timeout_seconds: Optional[float] = DEFAULT_SESSION_WALL_TIMEOUT_SECONDS,
         readonly_dir: str | Path | None = None,
         host_functions: Mapping[str, Callable[..., object]] | None = None,
         host_result_bytes: int = DEFAULT_HOST_RESULT_BYTES,
@@ -254,6 +321,7 @@ class MicroPythonSession:
         self._store = None
         self._timeout_timer: threading.Timer | None = None
         self._thread_host_functions: dict[str, Callable[..., object]] | None = None
+        self._wall_clock = _WallClock()
         # Only touched by the session thread, inside _session_exchange().
         self._inflight_request_id: str | None = None
         self._close_delivered = False
@@ -353,6 +421,8 @@ class MicroPythonSession:
         self._closed = True
         if self._started:
             self._request_queue.put({"op": "close"})
+        # A guest blocked in time.sleep() would never read the close message.
+        self._wall_clock.interrupt()
         if self._thread is not None:
             self._thread.join()
 
@@ -494,6 +564,9 @@ class MicroPythonSession:
 
         linker = Linker(engine)
         linker.define_wasi()
+        _define_interruptible_poll(
+            linker, store, self._wall_clock, Func, FuncType, ValType
+        )
         with self._callback_lock:
             host_functions: dict[str, Callable[..., object]] = dict(
                 self._host_functions
@@ -527,6 +600,8 @@ class MicroPythonSession:
                     raise MicroPythonWasmError(
                         f"guest exited with code {exc.code}"
                     ) from exc
+            except _WallTimeoutExceeded as exc:
+                raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
             except Trap as exc:
                 raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
             except WasmtimeError as exc:
@@ -561,6 +636,7 @@ class MicroPythonSession:
         if request_id is not None:
             self._inflight_request_id = None
             self._cancel_wall_timeout_timer()
+            self._wall_clock.stop()
             self._result_queue.put(_session_result_message(request_id, result))
 
         request = self._request_queue.get()
@@ -574,6 +650,7 @@ class MicroPythonSession:
             if self.wall_timeout_seconds is not None:
                 self._store.set_epoch_deadline(1)
                 self._start_wall_timeout_timer()
+        self._wall_clock.start(self.wall_timeout_seconds)
         return {"op": "run", "code": request["code"]}
 
     def _start_wall_timeout_timer(self) -> None:
@@ -737,8 +814,10 @@ def run_micropython_wasi(
 
     store.set_wasi(wasi)
 
+    wall_clock = _WallClock()
     linker = Linker(engine)
     linker.define_wasi()
+    _define_interruptible_poll(linker, store, wall_clock, Func, FuncType, ValType)
     _define_host_call(
         linker,
         store,
@@ -754,6 +833,7 @@ def run_micropython_wasi(
         timer = threading.Timer(wall_timeout_seconds, engine.increment_epoch)
         timer.daemon = True
         timer.start()
+    wall_clock.start(wall_timeout_seconds)
 
     try:
         module = Module.from_file(engine, str(wasm_path))
@@ -767,6 +847,8 @@ def run_micropython_wasi(
     except ExitTrap as exc:
         if getattr(exc, "code", 0) not in (0, None):
             raise MicroPythonWasmError(f"guest exited with code {exc.code}") from exc
+    except _WallTimeoutExceeded as exc:
+        raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
     except Trap as exc:
         raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
     except WasmtimeError as exc:
@@ -821,6 +903,101 @@ def _configure_readonly_dir(wasi, readonly_dir: str | Path | None, error_cls) ->
     # Always pass it explicitly: the default is a writable preopen, so an
     # unsupported wasmtime must fail here rather than fall back to read-write.
     wasi.preopen_dir(str(readonly_path), "/input", fs_mutable=False)
+
+
+# WASI preview1 constants and layouts used by poll_oneoff.
+_WASI_ERRNO_SUCCESS = 0
+_WASI_ERRNO_FAULT = 21
+_WASI_ERRNO_INVAL = 28
+_WASI_ERRNO_NOTSUP = 58
+_WASI_EVENTTYPE_CLOCK = 0
+_WASI_CLOCKID_REALTIME = 0
+_WASI_SUBCLOCKFLAGS_ABSTIME = 1
+_WASI_SUBSCRIPTION_SIZE = 48
+# userdata: u64, error: u16, type: u8, then fd_readwrite (nbytes: u64, flags: u16).
+_WASI_EVENT = struct.Struct("<QHB5xQH6x")
+
+
+def _define_interruptible_poll(
+    linker,
+    store,
+    wall_clock: _WallClock,
+    func_cls,
+    func_type_cls,
+    val_type_cls,
+) -> None:
+    """
+    Replace WASI poll_oneoff with a version that honours the wall timeout.
+
+    poll_oneoff is the only WASI call that can block the guest indefinitely. It
+    is what time.sleep() and select.poll() are built on. Wasmtime's own
+    implementation blocks inside the host, where neither fuel nor epoch
+    interruption can reach it, so a guest could outlast every limit by
+    sleeping.
+    """
+
+    def poll_oneoff(
+        caller, in_ptr: int, out_ptr: int, nsubscriptions: int, nevents_ptr: int
+    ) -> int:
+        if nsubscriptions <= 0:
+            return _WASI_ERRNO_INVAL
+        memory = caller.get("memory")
+        if memory is None:
+            return _WASI_ERRNO_FAULT
+        try:
+            raw = bytes(
+                memory.read(
+                    caller, in_ptr, in_ptr + nsubscriptions * _WASI_SUBSCRIPTION_SIZE
+                )
+            )
+        except Exception:
+            return _WASI_ERRNO_FAULT
+
+        ready: list[bytes] = []
+        clocks: list[tuple[int, bytes]] = []
+        for offset in range(0, len(raw), _WASI_SUBSCRIPTION_SIZE):
+            userdata, tag = struct.unpack_from("<QB", raw, offset)
+            if tag != _WASI_EVENTTYPE_CLOCK:
+                # The guest only ever holds stdio and files from a read-only
+                # preopen, none of which can block: stdin is always at end of
+                # file. Report them ready at once, as Wasmtime does.
+                ready.append(_WASI_EVENT.pack(userdata, _WASI_ERRNO_SUCCESS, tag, 0, 0))
+                continue
+            clock_id, timeout, flags = struct.unpack_from("<I4xQ8xH", raw, offset + 16)
+            errno = _WASI_ERRNO_SUCCESS
+            if flags & _WASI_SUBCLOCKFLAGS_ABSTIME:
+                if clock_id == _WASI_CLOCKID_REALTIME:
+                    timeout = max(0, timeout - time.time_ns())
+                else:
+                    # The guest's other clocks have an origin the host cannot
+                    # see, so an absolute deadline on them cannot be honoured.
+                    errno, timeout = _WASI_ERRNO_NOTSUP, 0
+            event = _WASI_EVENT.pack(userdata, errno, _WASI_EVENTTYPE_CLOCK, 0, 0)
+            clocks.append((timeout, event))
+
+        if not ready:
+            shortest = min(timeout for timeout, _ in clocks)
+            wall_clock.sleep(shortest / 1_000_000_000)
+            ready = [event for timeout, event in clocks if timeout == shortest]
+
+        try:
+            memory.write(caller, b"".join(ready), out_ptr)
+            memory.write(caller, struct.pack("<I", len(ready)), nevents_ptr)
+        except Exception:
+            return _WASI_ERRNO_FAULT
+        return _WASI_ERRNO_SUCCESS
+
+    ty = func_type_cls([val_type_cls.i32()] * 4, [val_type_cls.i32()])
+    linker.allow_shadowing = True
+    try:
+        linker.define(
+            store,
+            "wasi_snapshot_preview1",
+            "poll_oneoff",
+            func_cls(store, ty, poll_oneoff, access_caller=True),
+        )
+    finally:
+        linker.allow_shadowing = False
 
 
 def _define_host_call(

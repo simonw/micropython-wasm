@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from micropython_wasm import MicroPythonWasmError, default_wasm_path, run
@@ -342,6 +344,69 @@ def test_garbage_collection_inside_try_block_does_not_corrupt_vm(code):
 
     assert result.stdout == "True\n"
     assert result.stderr == ""
+
+
+# The guest asks to block for 30 seconds. If blocking calls stopped honouring
+# the wall timeout these tests would take that long and then fail, rather than
+# hang the test run.
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import time\ntime.sleep(30)",
+        "import select\nselect.poll().poll(30000)",
+    ],
+)
+def test_wall_timeout_interrupts_blocking_guest(code):
+    started = time.monotonic()
+    with pytest.raises(
+        MicroPythonWasmError, match="guest trapped: wall-clock timeout exceeded"
+    ):
+        run(code, wall_timeout_seconds=0.5)
+
+    assert time.monotonic() - started < 15
+
+
+def test_sleep_within_wall_timeout_completes():
+    result = run(
+        """
+import time
+start = time.ticks_ms()
+time.sleep(0.2)
+time.sleep_ms(100)
+time.sleep(0)
+print(time.ticks_diff(time.ticks_ms(), start) >= 290)
+""",
+        wall_timeout_seconds=30,
+    )
+
+    assert result.stdout == "True\n"
+
+
+def test_sleep_without_wall_timeout_completes():
+    result = run(
+        "import time\ntime.sleep(0.2)\nprint('awake')", wall_timeout_seconds=None
+    )
+
+    assert result.stdout == "awake\n"
+
+
+def test_poll_reports_stdio_ready_without_blocking():
+    started = time.monotonic()
+    result = run(
+        """
+import select, sys
+poller = select.poll()
+poller.register(sys.stdin, select.POLLIN)
+poller.register(sys.stdout, select.POLLOUT)
+print(sorted(event for _, event in poller.poll(30000)))
+print(repr(sys.stdin.read()))
+print(select.poll().poll(50))
+""",
+        wall_timeout_seconds=None,
+    )
+
+    assert result.stdout == "[1, 4]\n''\n[]\n"
+    assert time.monotonic() - started < 15
 
 
 def test_low_fuel_interrupts_infinite_loop():
