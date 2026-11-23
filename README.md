@@ -170,7 +170,8 @@ Arguments:
 - `fuel`: Wasmtime fuel budget. Guest execution traps when it runs out.
 - `wall_timeout_seconds`: wall-clock timeout, 1 second by default. It covers
   time the guest spends blocked in `time.sleep()` or `select.poll()` as well as
-  time spent executing. Pass `None` to disable it.
+  time spent executing, but not the time Wasmtime takes to compile the module
+  beforehand. Pass `None` to disable it.
 - `readonly_dir`: optional host directory to expose inside the guest as
   `/input`, with read-only WASI directory and file permissions.
 - `host_functions`: optional mapping of host function names to Python callables.

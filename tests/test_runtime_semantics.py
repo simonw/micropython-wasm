@@ -482,11 +482,23 @@ HEAP_SIZE = "import gc\nprint(gc.mem_free() + gc.mem_alloc())"
 MB = 1024 * 1024
 
 
+def heap_size(prefix: str = "", **kwargs) -> int:
+    # gc.mem_free() walks the whole heap, which takes fuel and time in
+    # proportion to its size, so these runs get plenty of fuel and no wall
+    # timeout. A slow CI machine must not turn them into timeouts.
+    result = run(
+        prefix + HEAP_SIZE,
+        fuel=GC_PRESSURE_FUEL,
+        wall_timeout_seconds=None,
+        **kwargs,
+    )
+    return int(result.stdout)
+
+
 @pytest.mark.parametrize("megabytes", [1, 2, 8, 32])
 def test_heap_is_sized_from_memory_bytes(megabytes):
     memory_bytes = megabytes * MB
-    # gc.mem_free() walks the whole heap, which takes fuel in proportion to it.
-    heap = int(run(HEAP_SIZE, memory_bytes=memory_bytes, fuel=GC_PRESSURE_FUEL).stdout)
+    heap = heap_size(memory_bytes=memory_bytes)
 
     # Nearly all of the limit is heap. The rest is the 384 KB reserved for the
     # runtime and the couple of percent MicroPython's collector keeps for its
@@ -497,7 +509,7 @@ def test_heap_is_sized_from_memory_bytes(megabytes):
 def test_default_memory_limit_gives_a_heap_of_several_megabytes():
     from micropython_wasm import DEFAULT_MEMORY_BYTES
 
-    heap = int(run(HEAP_SIZE, fuel=GC_PRESSURE_FUEL).stdout)
+    heap = heap_size()
 
     assert DEFAULT_MEMORY_BYTES == 4 * MB
     assert 3.5 * MB < heap < DEFAULT_MEMORY_BYTES
@@ -528,10 +540,8 @@ print(count * 10000 > 3 * 1024 * 1024, sorted([3, 1, 2]))
 def test_code_size_is_taken_out_of_the_heap():
     padding = "#" + "x" * MB + "\n"
 
-    small = int(run(HEAP_SIZE, memory_bytes=4 * MB, fuel=GC_PRESSURE_FUEL).stdout)
-    large = int(
-        run(padding + HEAP_SIZE, memory_bytes=4 * MB, fuel=GC_PRESSURE_FUEL).stdout
-    )
+    small = heap_size(memory_bytes=4 * MB)
+    large = heap_size(padding, memory_bytes=4 * MB)
 
     assert 0.95 * MB < small - large < 1.05 * MB
 
@@ -543,4 +553,5 @@ def test_memory_bytes_too_small_for_runtime_and_code_is_rejected():
     with pytest.raises(ValueError, match="for the code"):
         run("#" + "x" * (2 * MB) + "\nprint(1)", memory_bytes=2 * MB)
 
-    assert run("print(1)", memory_bytes=524288).stdout == "1\n"
+    result = run("print(1)", memory_bytes=524288, wall_timeout_seconds=None)
+    assert result.stdout == "1\n"

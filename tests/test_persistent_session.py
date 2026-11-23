@@ -546,7 +546,9 @@ def test_persistent_session_heap_is_sized_from_memory_bytes():
     heap_size = "import gc\nprint(gc.mem_free() + gc.mem_alloc())"
     for megabytes in (2, 16):
         memory_bytes = megabytes * 1024 * 1024
-        session = MicroPythonSession(memory_bytes=memory_bytes, fuel=2_000_000_000)
+        session = MicroPythonSession(
+            memory_bytes=memory_bytes, fuel=2_000_000_000, wall_timeout_seconds=None
+        )
         try:
             heap = int(session.run(heap_size).stdout)
         finally:

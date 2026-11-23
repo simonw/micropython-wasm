@@ -919,11 +919,6 @@ def run_micropython_wasi(
     )
 
     timer: threading.Timer | None = None
-    if wall_timeout_seconds is not None:
-        timer = threading.Timer(wall_timeout_seconds, engine.increment_epoch)
-        timer.daemon = True
-        timer.start()
-    wall_clock.start(wall_timeout_seconds)
 
     def captured(parts: list[bytes]) -> str:
         return b"".join(parts).decode("utf-8", "replace")
@@ -937,6 +932,13 @@ def run_micropython_wasi(
                 raise MicroPythonWasmError("WASI module does not export _start")
             if not isinstance(start, Func):
                 raise MicroPythonWasmError("WASI module _start export is not callable")
+            # Start the clock only now, so the timeout measures the guest and
+            # not how long this machine took to compile the module.
+            if wall_timeout_seconds is not None:
+                timer = threading.Timer(wall_timeout_seconds, engine.increment_epoch)
+                timer.daemon = True
+                timer.start()
+            wall_clock.start(wall_timeout_seconds)
             start(store)
         except ExitTrap as exc:
             if getattr(exc, "code", 0) not in (0, None):

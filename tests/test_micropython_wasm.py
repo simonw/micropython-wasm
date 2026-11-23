@@ -174,3 +174,26 @@ def test_build_script_fails_when_spill_pointers_output_is_missing(
         build_script.build_micropython(
             tmp_path / "micropython", "wasi", 1, [], None, None
         )
+
+
+def test_wall_timeout_does_not_include_module_compilation(monkeypatch):
+    if not default_wasm_path().exists():
+        pytest.skip("packaged MicroPython WASI artifact is not built")
+
+    import time
+
+    import wasmtime
+
+    real_from_file = wasmtime.Module.from_file
+
+    def slow_from_file(*args, **kwargs):
+        # Stand in for a machine that takes longer to compile the module than
+        # the whole wall timeout allows.
+        time.sleep(0.6)
+        return real_from_file(*args, **kwargs)
+
+    monkeypatch.setattr(wasmtime.Module, "from_file", slow_from_file)
+
+    result = run("print('ran')", wall_timeout_seconds=0.3)
+
+    assert result.stdout == "ran\n"
