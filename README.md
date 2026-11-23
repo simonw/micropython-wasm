@@ -53,12 +53,28 @@ uvx micropython-wasm --help
 ```
 
 The no-argument form starts a simple REPL with persistent state between
-prompts. Each line entered gets 10 seconds of wall-clock time. Use `--memory` to set the WebAssembly memory limit in bytes and
-`--fuel` to set the Wasmtime fuel budget:
+prompts. As in the Python REPL, a block such as a `def` or a loop is finished
+with a blank line.
+
+Options:
+
+- `--memory BYTES`: WebAssembly memory limit.
+- `--fuel COUNT`: Wasmtime fuel budget for each run.
+- `--timeout SECONDS`: wall-clock limit. The default is 1 second for `-c` and
+  files and 10 seconds for each line entered in the REPL. `0` means no limit.
 
 ```bash
-micropython-wasm --memory 33554432 --fuel 35000000 -c "print('hello')"
+micropython-wasm --memory 33554432 --fuel 35000000 --timeout 5 -c "print('hello')"
 ```
+
+With `-c` or a file, the exit status is the one MicroPython exited with: 0 on
+success, 1 after an uncaught exception, whose traceback is printed, or the
+argument of `sys.exit()`. If the code is stopped for running out of fuel or
+time, a `micropython-wasm:` message is printed and the status is 1.
+
+In the REPL, `sys.exit()` leaves the REPL with that status. Code that runs out
+of fuel or time stops the MicroPython VM, so the REPL starts a new one and says
+so. Variables and imports from before that point are lost.
 
 To use it in Python import code from the `micropython_wasm` package:
 
@@ -220,6 +236,8 @@ Methods and properties:
 - `session.close()`: send a close message to the guest loop and reject further
   runs.
 - `session.closed`: `True` after `close()`.
+- `session.stopped`: `True` once the VM has stopped and the session can run no
+  more code, whether through a trap, a timeout, a guest exit or `close()`.
 - `session.host_functions`: copy of registered host functions.
 - Context manager support: `with MicroPythonSession() as session: ...`.
 
@@ -514,6 +532,10 @@ ValueError: boom
 `MicroPythonSession.run()` raises with the guest exception as its message, such
 as `ValueError: boom`, and the same `stdout` and `stderr` attributes. The
 command line tool prints both before reporting the failure.
+
+`ex.exit_code` is the exit status of the MicroPython VM when the failure is
+that the VM exited: `1` for an uncaught exception in `run()`, or the argument
+of `sys.exit()`. It is `None` for traps, timeouts and every other error.
 
 ## Filesystem Access
 

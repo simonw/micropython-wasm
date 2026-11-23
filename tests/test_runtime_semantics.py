@@ -459,3 +459,17 @@ def test_errors_raised_before_guest_code_runs_have_empty_output(tmp_path):
     assert info.value.stdout == ""
     assert info.value.stderr == ""
     assert MicroPythonWasmError("plain").stdout == ""
+
+
+def test_error_exit_code_reports_how_the_guest_exited():
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("import sys\nsys.exit(3)", wall_timeout_seconds=None)
+    assert info.value.exit_code == 3
+
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("raise ValueError('boom')", wall_timeout_seconds=None)
+    assert info.value.exit_code == 1
+
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("while True:\n    pass", fuel=200_000, wall_timeout_seconds=None)
+    assert info.value.exit_code is None

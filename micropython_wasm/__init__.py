@@ -37,12 +37,23 @@ class MicroPythonWasmError(RuntimeError):
     the failure. ``stderr`` includes the MicroPython traceback for an uncaught
     guest exception. Both are empty strings for errors raised before any guest
     code ran.
+
+    ``exit_code`` is the exit status of the MicroPython VM when the failure is
+    that the VM exited, for example through ``sys.exit(3)`` or, with status 1,
+    an uncaught exception in ``run()``. It is ``None`` for every other error.
     """
 
-    def __init__(self, *args: object, stdout: str = "", stderr: str = "") -> None:
+    def __init__(
+        self,
+        *args: object,
+        stdout: str = "",
+        stderr: str = "",
+        exit_code: int | None = None,
+    ) -> None:
         super().__init__(*args)
         self.stdout = stdout
         self.stderr = stderr
+        self.exit_code = exit_code
 
 
 class MicroPythonWasmArtifactNotFound(MicroPythonWasmError):
@@ -365,6 +376,18 @@ class MicroPythonSession:
         return self._closed
 
     @property
+    def stopped(self) -> bool:
+        """
+        True once the VM has stopped and the session can run no more code.
+
+        That happens when guest code traps, runs out of fuel or time, or exits
+        the VM, and also after close(). A session that has not started its VM
+        yet is not stopped.
+        """
+
+        return self._thread is not None and not self._thread.is_alive()
+
+    @property
     def host_functions(self) -> Mapping[str, Callable[..., object]]:
         with self._callback_lock:
             return dict(self._host_functions)
@@ -508,7 +531,8 @@ class MicroPythonSession:
     def _raise_stopped(self) -> NoReturn:
         if self._thread_error is not None:
             raise MicroPythonWasmError(
-                f"MicroPythonSession stopped: {self._thread_error}"
+                f"MicroPythonSession stopped: {self._thread_error}",
+                exit_code=getattr(self._thread_error, "exit_code", None),
             )
         if self._closed:
             raise MicroPythonSessionClosed("MicroPythonSession is closed")
@@ -527,7 +551,9 @@ class MicroPythonSession:
                 # The VM ended without being asked to, for example because
                 # guest code called sys.exit(). Record that so callers waiting
                 # in run() are told instead of waiting forever.
-                self._thread_error = MicroPythonWasmError("guest exited with code 0")
+                self._thread_error = MicroPythonWasmError(
+                    "guest exited with code 0", exit_code=0
+                )
 
     def _run_bootstrap(self) -> None:
         try:
@@ -641,7 +667,7 @@ class MicroPythonSession:
             except ExitTrap as exc:
                 if getattr(exc, "code", 0) not in (0, None):
                     raise MicroPythonWasmError(
-                        f"guest exited with code {exc.code}"
+                        f"guest exited with code {exc.code}", exit_code=exc.code
                     ) from exc
             except _WallTimeoutExceeded as exc:
                 raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
@@ -896,7 +922,7 @@ def run_micropython_wasi(
         except ExitTrap as exc:
             if getattr(exc, "code", 0) not in (0, None):
                 raise MicroPythonWasmError(
-                    f"guest exited with code {exc.code}"
+                    f"guest exited with code {exc.code}", exit_code=exc.code
                 ) from exc
         except _WallTimeoutExceeded as exc:
             raise MicroPythonWasmError(f"guest trapped: {exc}") from exc

@@ -497,3 +497,42 @@ def test_persistent_session_trap_keeps_output_written_before_the_trap():
         assert info.value.stdout == "before\n"
     finally:
         session.close()
+
+
+def test_persistent_session_stopped_property_follows_the_vm():
+    session = MicroPythonSession()
+    assert not session.stopped  # not started yet
+    try:
+        session.run("x = 1")
+        assert not session.stopped
+
+        with pytest.raises(MicroPythonWasmError, match="ValueError") as info:
+            session.run("raise ValueError('still alive')")
+        assert info.value.exit_code is None
+        assert not session.stopped
+
+        with pytest.raises(MicroPythonWasmError, match="guest trapped") as info:
+            session.run("while True:\n    pass")
+        assert info.value.exit_code is None
+        assert session.stopped
+        assert not session.closed
+    finally:
+        session.close()
+
+    assert session.stopped
+
+
+def test_persistent_session_guest_exit_reports_exit_code():
+    session = MicroPythonSession()
+    try:
+        with pytest.raises(MicroPythonWasmError) as info:
+            run_with_deadline(session, "print('bye')\nimport sys\nsys.exit(3)")
+        assert info.value.exit_code == 3
+        assert info.value.stdout == "bye\n"
+        assert session.stopped
+
+        with pytest.raises(MicroPythonWasmError) as info:
+            run_with_deadline(session, "print(1)")
+        assert info.value.exit_code == 3
+    finally:
+        session.close()
