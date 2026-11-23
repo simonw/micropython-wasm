@@ -142,3 +142,69 @@ def test_cli_repl_passes_memory_and_fuel_options():
 
     assert exit_code == 0
     assert calls == [{"memory_bytes": 33_554_432, "fuel": 1_234}]
+
+
+TRACEBACK = 'Traceback (most recent call last):\n  File "<stdin>", line 2\nValueError: boom\n'
+
+
+def test_cli_shows_guest_output_and_traceback_when_execution_fails():
+    def fail(code: str, **kwargs: object) -> RunResult:
+        raise MicroPythonWasmError(
+            "guest exited with code 1", stdout="before\n", stderr=TRACEBACK
+        )
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = main(["-c", "ignored"], stdout=stdout, stderr=stderr, execute=fail)
+
+    assert exit_code == 1
+    assert stdout.getvalue() == "before\n"
+    assert stderr.getvalue() == (
+        TRACEBACK + "micropython-wasm: guest exited with code 1\n"
+    )
+
+
+class FailingSession(FakeSession):
+    def __init__(self, error: MicroPythonWasmError) -> None:
+        super().__init__()
+        self.error = error
+
+    def run(self, code: str) -> RunResult:
+        self.codes.append(code)
+        raise self.error
+
+
+def test_cli_repl_shows_guest_output_and_traceback_once():
+    session = FailingSession(
+        MicroPythonWasmError("ValueError: boom", stdout="before\n", stderr=TRACEBACK)
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    main(
+        [],
+        stdin=io.StringIO("fail()\n"),
+        stdout=stdout,
+        stderr=stderr,
+        session_factory=lambda **kwargs: session,
+    )
+
+    assert "before\n" in stdout.getvalue()
+    # The traceback already ends with the error, so it is not printed twice.
+    assert stderr.getvalue() == TRACEBACK
+
+
+def test_cli_repl_prints_error_that_has_no_traceback():
+    session = FailingSession(MicroPythonWasmError("guest trapped: out of fuel"))
+    stderr = io.StringIO()
+
+    main(
+        [],
+        stdin=io.StringIO("spin()\n"),
+        stdout=io.StringIO(),
+        stderr=stderr,
+        session_factory=lambda **kwargs: session,
+    )
+
+    assert stderr.getvalue() == "guest trapped: out of fuel\n"

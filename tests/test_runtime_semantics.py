@@ -419,3 +419,43 @@ def test_uncaught_guest_exception_is_reported_as_guest_failure():
         MicroPythonWasmError, match="guest exited with code 1|guest trapped"
     ):
         run('raise ValueError("boom")', wall_timeout_seconds=None)
+
+
+def test_uncaught_guest_exception_keeps_output_and_traceback():
+    with pytest.raises(MicroPythonWasmError, match="guest exited with code 1") as info:
+        run(
+            """
+print("before")
+
+def fail():
+    raise ValueError("boom")
+
+fail()
+""",
+            wall_timeout_seconds=None,
+        )
+
+    assert info.value.stdout == "before\n"
+    assert info.value.stderr.splitlines() == [
+        "Traceback (most recent call last):",
+        '  File "<stdin>", line 7, in <module>',
+        '  File "<stdin>", line 5, in fail',
+        "ValueError: boom",
+    ]
+
+
+def test_trapped_guest_keeps_output_written_before_the_trap():
+    with pytest.raises(MicroPythonWasmError, match="guest trapped") as info:
+        run("print('before')\nwhile True:\n    pass", wall_timeout_seconds=None)
+
+    assert info.value.stdout == "before\n"
+    assert info.value.stderr == ""
+
+
+def test_errors_raised_before_guest_code_runs_have_empty_output(tmp_path):
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("print(1)", wasm_path=tmp_path / "missing.wasm")
+
+    assert info.value.stdout == ""
+    assert info.value.stderr == ""
+    assert MicroPythonWasmError("plain").stdout == ""

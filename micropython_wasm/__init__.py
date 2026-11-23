@@ -30,7 +30,19 @@ __all__ = [
 
 
 class MicroPythonWasmError(RuntimeError):
-    """Base error raised by micropython-wasm."""
+    """
+    Base error raised by micropython-wasm.
+
+    When guest code fails, ``stdout`` and ``stderr`` hold what it wrote before
+    the failure. ``stderr`` includes the MicroPython traceback for an uncaught
+    guest exception. Both are empty strings for errors raised before any guest
+    code ran.
+    """
+
+    def __init__(self, *args: object, stdout: str = "", stderr: str = "") -> None:
+        super().__init__(*args)
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class MicroPythonWasmArtifactNotFound(MicroPythonWasmError):
@@ -62,7 +74,21 @@ _SESSION_CONTROL_FUNCTION = "__session_exchange__"
 
 _THREAD_BOOTSTRAP = r"""
 import host as __micropython_wasm_host
+import io as __micropython_wasm_io
 import json as __micropython_wasm_json
+import sys as __micropython_wasm_sys
+
+def __micropython_wasm_print_exception(ex):
+    # Write the traceback to stderr as an uncaught exception would, leaving out
+    # the frame of this loop, which is the only code in the file "<stdin>".
+    try:
+        buffer = __micropython_wasm_io.StringIO()
+        __micropython_wasm_sys.print_exception(ex, buffer)
+        for line in buffer.getvalue().split("\n"):
+            if line and not line.startswith('  File "<stdin>"'):
+                __micropython_wasm_sys.stderr.write(line + "\n")
+    except Exception:
+        pass
 
 def __micropython_wasm_exchange(result):
     payload = __micropython_wasm_json.dumps({"args": [result], "kwargs": {}})
@@ -87,6 +113,7 @@ while True:
             "ok": False,
             "error": type(__micropython_wasm_ex).__name__ + ": " + str(__micropython_wasm_ex),
         }
+        __micropython_wasm_print_exception(__micropython_wasm_ex)
 """
 
 
@@ -243,17 +270,22 @@ class MicroPythonReplaySession:
         marker = f"__micropython_wasm_session_{uuid.uuid4().hex}__"
         marker_line = _marker_code(marker)
         transcript = "\n\n".join([*self._preamble, *self._snippets, marker_line, code])
-        result = run_micropython_wasi(
-            transcript,
-            self.wasm_path,
-            memory_bytes=self.memory_bytes,
-            fuel=self.fuel,
-            wall_timeout_seconds=self.wall_timeout_seconds,
-            readonly_dir=self.readonly_dir,
-            host_functions=self._host_functions,
-            host_result_bytes=self.host_result_bytes,
-        )
         marker_with_newline = marker + "\n"
+        try:
+            result = run_micropython_wasi(
+                transcript,
+                self.wasm_path,
+                memory_bytes=self.memory_bytes,
+                fuel=self.fuel,
+                wall_timeout_seconds=self.wall_timeout_seconds,
+                readonly_dir=self.readonly_dir,
+                host_functions=self._host_functions,
+                host_result_bytes=self.host_result_bytes,
+            )
+        except MicroPythonWasmError as exc:
+            # Only report what the new snippet printed, not the replayed ones.
+            exc.stdout = exc.stdout.partition(marker_with_newline)[2]
+            raise
         if marker_with_newline not in result.stdout:
             raise MicroPythonWasmError("session marker was not found in guest stdout")
 
@@ -392,12 +424,14 @@ class MicroPythonSession:
 
             self._request_queue.put({"op": "run", "id": request_id, "code": code})
 
-            result = self._wait_for_result(request_id)
+            try:
+                result = self._wait_for_result(request_id)
+            except MicroPythonWasmError as exc:
+                # The VM stopped part way through. Keep what it had written.
+                exc.stdout, exc.stderr = self._take_request_output()
+                raise
 
-            with self._callback_lock:
-                stdout = b"".join(self._stdout_parts).decode("utf-8", "replace")
-                stderr = b"".join(self._stderr_parts).decode("utf-8", "replace")
-                self._current_request_id = None
+            stdout, stderr = self._take_request_output()
 
             fuel_remaining = -1
             if self._store is not None:
@@ -408,7 +442,9 @@ class MicroPythonSession:
 
             if not result.get("ok"):
                 raise MicroPythonWasmError(
-                    str(result.get("error", "guest execution failed"))
+                    str(result.get("error", "guest execution failed")),
+                    stdout=stdout,
+                    stderr=stderr,
                 )
 
             return RunResult(
@@ -440,6 +476,13 @@ class MicroPythonSession:
         self._started = True
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
         self._thread.start()
+
+    def _take_request_output(self) -> tuple[str, str]:
+        with self._callback_lock:
+            stdout = b"".join(self._stdout_parts).decode("utf-8", "replace")
+            stderr = b"".join(self._stderr_parts).decode("utf-8", "replace")
+            self._current_request_id = None
+        return stdout, stderr
 
     def _wait_for_result(self, request_id: str) -> dict[str, object]:
         while True:
@@ -835,32 +878,46 @@ def run_micropython_wasi(
         timer.start()
     wall_clock.start(wall_timeout_seconds)
 
+    def captured(parts: list[bytes]) -> str:
+        return b"".join(parts).decode("utf-8", "replace")
+
     try:
-        module = Module.from_file(engine, str(wasm_path))
-        instance = linker.instantiate(store, module)
-        start = instance.exports(store).get("_start")
-        if start is None:
-            raise MicroPythonWasmError("WASI module does not export _start")
-        if not isinstance(start, Func):
-            raise MicroPythonWasmError("WASI module _start export is not callable")
-        start(store)
-    except ExitTrap as exc:
-        if getattr(exc, "code", 0) not in (0, None):
-            raise MicroPythonWasmError(f"guest exited with code {exc.code}") from exc
-    except _WallTimeoutExceeded as exc:
-        raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
-    except Trap as exc:
-        raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
-    except WasmtimeError as exc:
-        raise MicroPythonWasmError(f"wasmtime error: {exc}") from exc
-    finally:
-        if timer is not None:
-            timer.cancel()
-            timer.join()
+        try:
+            module = Module.from_file(engine, str(wasm_path))
+            instance = linker.instantiate(store, module)
+            start = instance.exports(store).get("_start")
+            if start is None:
+                raise MicroPythonWasmError("WASI module does not export _start")
+            if not isinstance(start, Func):
+                raise MicroPythonWasmError(
+                    "WASI module _start export is not callable"
+                )
+            start(store)
+        except ExitTrap as exc:
+            if getattr(exc, "code", 0) not in (0, None):
+                raise MicroPythonWasmError(
+                    f"guest exited with code {exc.code}"
+                ) from exc
+        except _WallTimeoutExceeded as exc:
+            raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
+        except Trap as exc:
+            raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
+        except WasmtimeError as exc:
+            raise MicroPythonWasmError(f"wasmtime error: {exc}") from exc
+        finally:
+            if timer is not None:
+                timer.cancel()
+                timer.join()
+    except MicroPythonWasmError as exc:
+        # Keep what the guest wrote before it failed, including the traceback
+        # MicroPython prints to stderr for an uncaught exception.
+        exc.stdout = captured(stdout_parts)
+        exc.stderr = captured(stderr_parts)
+        raise
 
     return RunResult(
-        stdout=b"".join(stdout_parts).decode("utf-8", "replace"),
-        stderr=b"".join(stderr_parts).decode("utf-8", "replace"),
+        stdout=captured(stdout_parts),
+        stderr=captured(stderr_parts),
         fuel_remaining=store.get_fuel(),
     )
 

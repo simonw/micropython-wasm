@@ -463,3 +463,37 @@ def test_persistent_session_close_wakes_sleeping_guest():
     assert isinstance(outcome["error"], MicroPythonWasmError)
     assert session._thread is not None
     assert not session._thread.is_alive()
+
+
+def test_persistent_session_guest_exception_keeps_output_and_traceback():
+    session = MicroPythonSession()
+    try:
+        session.run("def fail():\n    raise ValueError('boom')")
+        with pytest.raises(MicroPythonWasmError, match="^ValueError: boom$") as info:
+            session.run("print('before')\nfail()")
+
+        assert info.value.stdout == "before\n"
+        # The frame of the session's own bootstrap loop is left out.
+        assert info.value.stderr.splitlines() == [
+            "Traceback (most recent call last):",
+            '  File "<string>", line 2, in <module>',
+            '  File "<string>", line 2, in fail',
+            "ValueError: boom",
+        ]
+
+        # The next run starts with clean output.
+        result = session.run("print('after')")
+        assert (result.stdout, result.stderr) == ("after\n", "")
+    finally:
+        session.close()
+
+
+def test_persistent_session_trap_keeps_output_written_before_the_trap():
+    session = MicroPythonSession()
+    try:
+        with pytest.raises(MicroPythonWasmError, match="guest trapped") as info:
+            session.run("print('before')\nwhile True:\n    pass")
+
+        assert info.value.stdout == "before\n"
+    finally:
+        session.close()

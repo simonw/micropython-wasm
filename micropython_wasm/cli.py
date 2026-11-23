@@ -107,6 +107,10 @@ def _run_code(
     try:
         result = execute(code, memory_bytes=memory_bytes, fuel=fuel)
     except MicroPythonWasmError as exc:
+        # Show what the guest printed before it failed, including the
+        # traceback MicroPython writes to stderr for an uncaught exception.
+        stdout.write(exc.stdout)
+        stderr.write(exc.stderr)
         print(f"micropython-wasm: {exc}", file=stderr)
         return 1
 
@@ -152,7 +156,12 @@ def _repl(
             try:
                 result = session.run(_repl_code(source))
             except MicroPythonWasmError as exc:
-                print(exc, file=stderr)
+                stdout.write(exc.stdout)
+                stderr.write(exc.stderr)
+                # An uncaught guest exception already ends its traceback with
+                # the same "Type: message" line that the error carries.
+                if not exc.stderr.rstrip().endswith(str(exc)):
+                    print(exc, file=stderr)
                 continue
             _write_result(result, stdout, stderr)
     finally:

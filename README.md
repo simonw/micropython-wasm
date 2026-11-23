@@ -485,16 +485,35 @@ The package raises:
   missing Wasmtime support, or invalid preopened directories.
 - `ValueError` for invalid host-side resource limits.
 
-For example:
+When guest code fails, the `MicroPythonWasmError` carries what it wrote before
+the failure in `stdout` and `stderr`. For an uncaught guest exception `stderr`
+ends with the MicroPython traceback:
 
 ```python
 from micropython_wasm import MicroPythonWasmError, run
 
 try:
-    run('raise ValueError("boom")')
+    run('print("before")\nraise ValueError("boom")')
 except MicroPythonWasmError as ex:
     print(ex)
+    print(ex.stdout)
+    print(ex.stderr)
 ```
+
+Output:
+
+```text
+guest exited with code 1
+before
+
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+ValueError: boom
+```
+
+`MicroPythonSession.run()` raises with the guest exception as its message, such
+as `ValueError: boom`, and the same `stdout` and `stderr` attributes. The
+command line tool prints both before reporting the failure.
 
 ## Filesystem Access
 
