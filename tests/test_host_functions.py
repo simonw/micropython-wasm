@@ -190,3 +190,36 @@ print(host.call("missing", "{}"))
     )
 
     assert result.stdout == '{"ok":false,"error":"KeyError: \'missing\'"}\n'
+
+
+def test_session_host_functions_survive_syntax_error_in_first_run():
+    session = MicroPythonSession(host_functions={"add": lambda a, b: a + b})
+    session.register_function(lambda value: value.upper(), name="shout")
+    try:
+        with pytest.raises(MicroPythonWasmError, match="SyntaxError"):
+            session.run("x = (")
+
+        assert session.run("print(add(1, 2), shout('hi'))").stdout == "3 HI\n"
+    finally:
+        session.close()
+
+
+def test_session_host_function_wrappers_do_not_shift_traceback_line_numbers():
+    session = MicroPythonSession(host_functions={"add": lambda a, b: a + b})
+    try:
+        with pytest.raises(MicroPythonWasmError, match="ValueError: boom") as info:
+            session.run("total = add(1, 2)\nraise ValueError('boom')")
+
+        assert '  File "<string>", line 2, in <module>' in info.value.stderr
+        assert session.run("print(total)").stdout == "3\n"
+    finally:
+        session.close()
+
+
+def test_session_function_registered_twice_before_start_uses_latest():
+    session = MicroPythonSession(host_functions={"value": lambda: "first"})
+    session.register_function(lambda: "second", name="value")
+    try:
+        assert session.run("print(value())").stdout == "second\n"
+    finally:
+        session.close()

@@ -434,45 +434,53 @@ class MicroPythonSession:
         self._ensure_started()
 
         with self._run_lock:
-            self._raise_if_stopped()
-            request_id = uuid.uuid4().hex
-            if self._pending_preamble:
-                code = "\n\n".join([*self._pending_preamble, code])
-                self._pending_preamble.clear()
+            # Define wrappers for host functions registered before the VM
+            # started. Each runs as its own request and is only forgotten once
+            # it has succeeded, so a failure in the caller's code, even a
+            # syntax error, cannot take the wrappers down with it. It also
+            # keeps the line numbers in the caller's tracebacks right.
+            while self._pending_preamble:
+                self._execute(self._pending_preamble[0])
+                del self._pending_preamble[0]
+            return self._execute(code)
 
-            with self._callback_lock:
-                self._current_request_id = request_id
-                self._stdout_parts = []
-                self._stderr_parts = []
+    def _execute(self, code: str) -> RunResult:
+        """Run one request. The caller must hold _run_lock."""
 
-            self._request_queue.put({"op": "run", "id": request_id, "code": code})
+        self._raise_if_stopped()
+        request_id = uuid.uuid4().hex
 
+        with self._callback_lock:
+            self._current_request_id = request_id
+            self._stdout_parts = []
+            self._stderr_parts = []
+
+        self._request_queue.put({"op": "run", "id": request_id, "code": code})
+
+        try:
+            result = self._wait_for_result(request_id)
+        except MicroPythonWasmError as exc:
+            # The VM stopped part way through. Keep what it had written.
+            exc.stdout, exc.stderr = self._take_request_output()
+            raise
+
+        stdout, stderr = self._take_request_output()
+
+        fuel_remaining = -1
+        if self._store is not None:
             try:
-                result = self._wait_for_result(request_id)
-            except MicroPythonWasmError as exc:
-                # The VM stopped part way through. Keep what it had written.
-                exc.stdout, exc.stderr = self._take_request_output()
-                raise
+                fuel_remaining = self._store.get_fuel()
+            except Exception:
+                fuel_remaining = -1
 
-            stdout, stderr = self._take_request_output()
-
-            fuel_remaining = -1
-            if self._store is not None:
-                try:
-                    fuel_remaining = self._store.get_fuel()
-                except Exception:
-                    fuel_remaining = -1
-
-            if not result.get("ok"):
-                raise MicroPythonWasmError(
-                    str(result.get("error", "guest execution failed")),
-                    stdout=stdout,
-                    stderr=stderr,
-                )
-
-            return RunResult(
-                stdout=stdout, stderr=stderr, fuel_remaining=fuel_remaining
+        if not result.get("ok"):
+            raise MicroPythonWasmError(
+                str(result.get("error", "guest execution failed")),
+                stdout=stdout,
+                stderr=stderr,
             )
+
+        return RunResult(stdout=stdout, stderr=stderr, fuel_remaining=fuel_remaining)
 
     def close(self) -> None:
         if self._closed:
@@ -915,9 +923,7 @@ def run_micropython_wasi(
             if start is None:
                 raise MicroPythonWasmError("WASI module does not export _start")
             if not isinstance(start, Func):
-                raise MicroPythonWasmError(
-                    "WASI module _start export is not callable"
-                )
+                raise MicroPythonWasmError("WASI module _start export is not callable")
             start(store)
         except ExitTrap as exc:
             if getattr(exc, "code", 0) not in (0, None):
