@@ -12,11 +12,16 @@ from pathlib import Path
 from typing import Callable, Mapping, NoReturn, Optional
 
 DEFAULT_HOST_RESULT_BYTES = 256 * 1024
+# Garbage collection is paid for in fuel, in proportion to how much of the heap
+# is in use, so the default heap has to stay small enough that one collection
+# fits comfortably inside DEFAULT_FUEL. See "Memory" in the README.
+DEFAULT_MEMORY_BYTES = 4 * 1024 * 1024
 DEFAULT_FUEL = 35_000_000
 DEFAULT_SESSION_WALL_TIMEOUT_SECONDS = 10.0
 
 __all__ = [
     "DEFAULT_FUEL",
+    "DEFAULT_MEMORY_BYTES",
     "DEFAULT_SESSION_WALL_TIMEOUT_SECONDS",
     "MicroPythonWasmError",
     "MicroPythonWasmArtifactNotFound",
@@ -214,7 +219,7 @@ class MicroPythonReplaySession:
         self,
         wasm_path: str | Path | None = None,
         *,
-        memory_bytes: int = 16 * 1024 * 1024,
+        memory_bytes: int = DEFAULT_MEMORY_BYTES,
         fuel: int = DEFAULT_FUEL,
         wall_timeout_seconds: Optional[float] = 1.0,
         readonly_dir: str | Path | None = None,
@@ -330,7 +335,7 @@ class MicroPythonSession:
         self,
         wasm_path: str | Path | None = None,
         *,
-        memory_bytes: int = 16 * 1024 * 1024,
+        memory_bytes: int = DEFAULT_MEMORY_BYTES,
         fuel: int = DEFAULT_FUEL,
         wall_timeout_seconds: Optional[float] = DEFAULT_SESSION_WALL_TIMEOUT_SECONDS,
         readonly_dir: str | Path | None = None,
@@ -627,7 +632,7 @@ class MicroPythonSession:
                     self._stderr_parts.append(data)
 
         wasi = WasiConfig()
-        wasi.argv = ["micropython", "-c", _THREAD_BOOTSTRAP]
+        wasi.argv = _guest_argv(self.memory_bytes, _THREAD_BOOTSTRAP)
         wasi.env = []
         wasi.stdout_custom = capture_stdout
         wasi.stderr_custom = capture_stderr
@@ -796,7 +801,7 @@ def run(
     code: str,
     wasm_path: str | Path | None = None,
     *,
-    memory_bytes: int = 16 * 1024 * 1024,
+    memory_bytes: int = DEFAULT_MEMORY_BYTES,
     fuel: int = DEFAULT_FUEL,
     wall_timeout_seconds: Optional[float] = 1.0,
     readonly_dir: str | Path | None = None,
@@ -821,7 +826,7 @@ def run_micropython_wasi(
     code: str,
     wasm_path: str | Path,
     *,
-    memory_bytes: int = 16 * 1024 * 1024,
+    memory_bytes: int = DEFAULT_MEMORY_BYTES,
     fuel: int = DEFAULT_FUEL,
     wall_timeout_seconds: Optional[float] = 1.0,
     readonly_dir: str | Path | None = None,
@@ -831,8 +836,8 @@ def run_micropython_wasi(
     """
     Run code through a WASI MicroPython command module.
 
-    The wasm module is expected to behave like ``micropython -c <code>`` and
-    export ``_start``. Each call creates a fresh Wasmtime engine, store, WASI
+    The wasm module is expected to behave like
+    ``micropython -X heapsize=<bytes> -c <code>`` and export ``_start``. Each call creates a fresh Wasmtime engine, store, WASI
     config, and module instance.
     """
 
@@ -890,7 +895,7 @@ def run_micropython_wasi(
         stderr_parts.append(bytes(data))
 
     wasi = WasiConfig()
-    wasi.argv = ["micropython", "-c", code]
+    wasi.argv = _guest_argv(memory_bytes, code)
     wasi.env = []
     wasi.stdout_custom = capture_stdout
     wasi.stderr_custom = capture_stderr
@@ -960,6 +965,43 @@ def run_micropython_wasi(
         stderr=captured(stderr_parts),
         fuel_remaining=store.get_fuel(),
     )
+
+
+_WASM_PAGE_BYTES = 64 * 1024
+# Linear memory the guest uses outside the MicroPython heap: static data, the C
+# stack and libc. It measures 197 KB for the bundled artifact, whatever the
+# heap size. The rest of this is headroom for libc allocations.
+_MEMORY_RESERVE_BYTES = 384 * 1024
+_MIN_HEAP_BYTES = 64 * 1024
+
+
+def _heap_bytes(memory_bytes: int, code: str) -> int:
+    """
+    Size the MicroPython heap to fill the memory limit.
+
+    MicroPython allocates its garbage collected heap once, at startup, and
+    defaults to 1 MB whatever the memory limit is. Give it what is left of
+    memory_bytes after the runtime's fixed overhead and the code itself, which
+    libc copies into linear memory along with the rest of argv.
+    """
+
+    usable = memory_bytes // _WASM_PAGE_BYTES * _WASM_PAGE_BYTES
+    code_bytes = len(code.encode("utf-8", "surrogatepass")) + 1
+    heap = (usable - _MEMORY_RESERVE_BYTES - code_bytes) // 1024 * 1024
+    if heap < _MIN_HEAP_BYTES:
+        needed = _MEMORY_RESERVE_BYTES + code_bytes + _MIN_HEAP_BYTES
+        needed = -(-needed // _WASM_PAGE_BYTES) * _WASM_PAGE_BYTES
+        raise ValueError(
+            f"memory_bytes must be at least {needed} to run this code: "
+            f"{_MEMORY_RESERVE_BYTES} bytes for the MicroPython runtime, "
+            f"{code_bytes} for the code and {_MIN_HEAP_BYTES} for a minimal heap"
+        )
+    return heap
+
+
+def _guest_argv(memory_bytes: int, code: str) -> list[str]:
+    heap = _heap_bytes(memory_bytes, code)
+    return ["micropython", "-X", f"heapsize={heap}", "-c", code]
 
 
 def _validate_execution_options(

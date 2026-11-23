@@ -232,12 +232,15 @@ def test_standard_library_subset(code, expected):
 
 def test_instances_are_fresh_between_runs():
     assert run_stdout("x = 42\nprint(x)") == "42\n"
-    assert run_stdout("""
+    assert (
+        run_stdout("""
 try:
     print(x)
 except NameError:
     print("missing")
-""") == "missing\n"
+""")
+        == "missing\n"
+    )
 
 
 def test_readonly_preopened_directory_allows_reading(tmp_path):
@@ -473,3 +476,71 @@ def test_error_exit_code_reports_how_the_guest_exited():
     with pytest.raises(MicroPythonWasmError) as info:
         run("while True:\n    pass", fuel=200_000, wall_timeout_seconds=None)
     assert info.value.exit_code is None
+
+
+HEAP_SIZE = "import gc\nprint(gc.mem_free() + gc.mem_alloc())"
+MB = 1024 * 1024
+
+
+@pytest.mark.parametrize("megabytes", [1, 2, 8, 32])
+def test_heap_is_sized_from_memory_bytes(megabytes):
+    memory_bytes = megabytes * MB
+    # gc.mem_free() walks the whole heap, which takes fuel in proportion to it.
+    heap = int(run(HEAP_SIZE, memory_bytes=memory_bytes, fuel=GC_PRESSURE_FUEL).stdout)
+
+    # Nearly all of the limit is heap. The rest is the 384 KB reserved for the
+    # runtime and the couple of percent MicroPython's collector keeps for its
+    # own bookkeeping.
+    assert 0.95 * (memory_bytes - 400 * 1024) < heap < memory_bytes
+
+
+def test_default_memory_limit_gives_a_heap_of_several_megabytes():
+    from micropython_wasm import DEFAULT_MEMORY_BYTES
+
+    heap = int(run(HEAP_SIZE, fuel=GC_PRESSURE_FUEL).stdout)
+
+    assert DEFAULT_MEMORY_BYTES == 4 * MB
+    assert 3.5 * MB < heap < DEFAULT_MEMORY_BYTES
+
+
+def test_guest_can_fill_the_heap_and_recover():
+    result = run(
+        """
+import gc
+chunks = []
+try:
+    while True:
+        chunks.append(bytearray(10000))
+except MemoryError:
+    count = len(chunks)
+    chunks = None
+    gc.collect()
+print(count * 10000 > 3 * 1024 * 1024, sorted([3, 1, 2]))
+""",
+        memory_bytes=4 * MB,
+        fuel=GC_PRESSURE_FUEL,
+        wall_timeout_seconds=None,
+    )
+
+    assert result.stdout == "True [1, 2, 3]\n"
+
+
+def test_code_size_is_taken_out_of_the_heap():
+    padding = "#" + "x" * MB + "\n"
+
+    small = int(run(HEAP_SIZE, memory_bytes=4 * MB, fuel=GC_PRESSURE_FUEL).stdout)
+    large = int(
+        run(padding + HEAP_SIZE, memory_bytes=4 * MB, fuel=GC_PRESSURE_FUEL).stdout
+    )
+
+    assert 0.95 * MB < small - large < 1.05 * MB
+
+
+def test_memory_bytes_too_small_for_runtime_and_code_is_rejected():
+    with pytest.raises(ValueError, match="memory_bytes must be at least 524288"):
+        run("print(1)", memory_bytes=256 * 1024)
+
+    with pytest.raises(ValueError, match="for the code"):
+        run("#" + "x" * (2 * MB) + "\nprint(1)", memory_bytes=2 * MB)
+
+    assert run("print(1)", memory_bytes=524288).stdout == "1\n"

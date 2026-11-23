@@ -9,6 +9,7 @@ from typing import Callable, Protocol, Sequence, TextIO
 
 from . import (
     DEFAULT_FUEL,
+    DEFAULT_MEMORY_BYTES,
     DEFAULT_SESSION_WALL_TIMEOUT_SECONDS,
     MicroPythonSession,
     MicroPythonWasmError,
@@ -16,7 +17,6 @@ from . import (
     run,
 )
 
-DEFAULT_MEMORY_BYTES = 16 * 1024 * 1024
 DEFAULT_RUN_WALL_TIMEOUT_SECONDS = 1.0
 
 

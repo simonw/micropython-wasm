@@ -146,7 +146,9 @@ def test_cli_repl_passes_memory_and_fuel_options():
     assert calls == [{"memory_bytes": 33_554_432, "fuel": 1_234}]
 
 
-TRACEBACK = 'Traceback (most recent call last):\n  File "<stdin>", line 2\nValueError: boom\n'
+TRACEBACK = (
+    'Traceback (most recent call last):\n  File "<stdin>", line 2\nValueError: boom\n'
+)
 
 
 def test_cli_shows_guest_output_and_traceback_when_execution_fails():
@@ -290,11 +292,15 @@ def test_cli_repl_keeps_session_after_ordinary_guest_exception():
     )
 
     assert len(created) == 1
-    assert session.codes == [
-        "__micropython_wasm_repl_value = (fail())\n"
-        "if __micropython_wasm_repl_value is not None:\n"
-        "    print(repr(__micropython_wasm_repl_value))"
-    ] * 2
+    assert (
+        session.codes
+        == [
+            "__micropython_wasm_repl_value = (fail())\n"
+            "if __micropython_wasm_repl_value is not None:\n"
+            "    print(repr(__micropython_wasm_repl_value))"
+        ]
+        * 2
+    )
     assert "restarted" not in stderr.getvalue()
 
 
@@ -408,3 +414,17 @@ def test_cli_repl_end_to_end_with_real_session():
         '  File "<string>", line 1, in <module>',
         "NameError: name 'double' isn't defined",
     ]
+
+
+def test_cli_default_memory_matches_library_default():
+    from micropython_wasm import DEFAULT_MEMORY_BYTES
+
+    calls: list[dict[str, object]] = []
+
+    def execute(code: str, **kwargs: object) -> RunResult:
+        calls.append(kwargs)
+        return RunResult(stdout="", stderr="", fuel_remaining=1)
+
+    main(["-c", "print(1)"], execute=execute)
+
+    assert calls[0]["memory_bytes"] == DEFAULT_MEMORY_BYTES

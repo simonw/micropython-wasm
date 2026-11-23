@@ -58,13 +58,14 @@ with a blank line.
 
 Options:
 
-- `--memory BYTES`: WebAssembly memory limit.
+- `--memory BYTES`: WebAssembly memory limit, 4 MB by default. Nearly all of it
+  becomes the MicroPython heap. See [Resource Controls](#resource-controls).
 - `--fuel COUNT`: Wasmtime fuel budget for each run.
 - `--timeout SECONDS`: wall-clock limit. The default is 1 second for `-c` and
   files and 10 seconds for each line entered in the REPL. `0` means no limit.
 
 ```bash
-micropython-wasm --memory 33554432 --fuel 35000000 --timeout 5 -c "print('hello')"
+micropython-wasm --memory 8388608 --fuel 70000000 --timeout 5 -c "print('hello')"
 ```
 
 With `-c` or a file, the exit status is the one MicroPython exited with: 0 on
@@ -151,7 +152,7 @@ from micropython_wasm import run
 
 result = run(
     "print(sum(range(10)))",
-    memory_bytes=16 * 1024 * 1024,
+    memory_bytes=4 * 1024 * 1024,
     fuel=35_000_000,
     wall_timeout_seconds=1.0,
     host_result_bytes=256 * 1024,
@@ -163,7 +164,9 @@ Arguments:
 - `code`: MicroPython source code passed as `micropython -c <code>`.
 - `wasm_path`: optional path to a custom WASI MicroPython artifact. If omitted,
   `micropython_wasm/artifacts/micropython-wasi.wasm` is used.
-- `memory_bytes`: maximum WebAssembly linear memory for the store.
+- `memory_bytes`: maximum WebAssembly linear memory for the guest, 4 MB by
+  default. The MicroPython heap is sized to fill it, less about 0.4 MB for the
+  runtime and the size of the code. See [Resource Controls](#resource-controls).
 - `fuel`: Wasmtime fuel budget. Guest execution traps when it runs out.
 - `wall_timeout_seconds`: wall-clock timeout, 1 second by default. It covers
   time the guest spends blocked in `time.sleep()` or `select.poll()` as well as
@@ -219,7 +222,7 @@ function arguments as `run()`:
 
 ```python
 session = MicroPythonSession(
-    memory_bytes=16 * 1024 * 1024,
+    memory_bytes=4 * 1024 * 1024,
     fuel=35_000_000,
     wall_timeout_seconds=10.0,
     readonly_dir="fixtures",
@@ -292,7 +295,7 @@ session.close()
 
 ```python
 session = MicroPythonReplaySession(
-    memory_bytes=16 * 1024 * 1024,
+    memory_bytes=4 * 1024 * 1024,
     fuel=35_000_000,
     wall_timeout_seconds=1.0,
     readonly_dir="fixtures",
@@ -604,6 +607,63 @@ Fuel is not consumed while the guest is blocked, so the wall-clock timeout is
 the only limit on sleeping. With `wall_timeout_seconds=None` a guest can call
 `time.sleep()` for as long as it likes and the call into this package will not
 return until it wakes.
+
+### Memory
+
+`memory_bytes` is the most WebAssembly linear memory the guest may have. The
+default is 4 MB (`DEFAULT_MEMORY_BYTES`).
+
+MicroPython allocates its garbage-collected heap once, at startup, so this
+package sizes the heap to fill the limit by passing MicroPython's
+`-X heapsize=` option. The heap gets `memory_bytes` minus:
+
+- 384 KB reserved for the MicroPython runtime: its static data, C stack and
+  libc. The bundled artifact uses 197 KB of that.
+- The size of the code being run, which is copied into guest memory.
+
+With the default limit that is a heap of about 3.6 MB. A `MicroPythonSession`
+also keeps a buffer of `host_result_bytes` (256 KB by default) on the heap for
+host function results.
+
+Guest code that needs more than the heap gets an ordinary `MemoryError`, which
+it can catch. `memory_bytes` must be at least 512 KB plus the size of the
+code; anything smaller raises `ValueError`.
+
+Earlier releases left the heap at MicroPython's default of 1 MB whatever
+`memory_bytes` was, with a default limit of 16 MB that guests could never
+reach.
+
+A custom artifact passed as `wasm_path` must accept the `-X heapsize=` option,
+as any build of MicroPython's Unix port does.
+
+#### Memory and fuel
+
+A bigger heap needs a bigger fuel budget, because the work MicroPython does to
+manage memory is charged as fuel like any other guest code. Measured with the
+bundled artifact:
+
+- An automatic garbage collection costs about 3.5 million fuel per megabyte of
+  garbage it sweeps, and about 11 million per megabyte of live data it marks.
+  It is charged to whichever run happens to trigger it.
+- `gc.mem_free()` and `gc.mem_alloc()` walk the whole heap, at about 5 million
+  fuel per megabyte of heap each.
+- Filling memory is not free either: `bytearray(8 * 1024 * 1024)` costs about
+  40 million fuel.
+
+The defaults are chosen together. Sweeping a default heap full of garbage costs
+about 15 million of the default 35 million fuel. If you raise `memory_bytes`,
+raise `fuel` in proportion, or a collection can use up a run's whole budget:
+
+```python
+from micropython_wasm import run
+
+result = run(
+    "data = bytearray(8 * 1024 * 1024)\nprint(len(data))",
+    memory_bytes=16 * 1024 * 1024,
+    fuel=140_000_000,
+)
+print(result.stdout)  # 8388608
+```
 
 `memory_bytes` limits guest linear memory, not total host process RSS. Wasmtime
 runtime memory, compiled code, Python process memory, and host callbacks are

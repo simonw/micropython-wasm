@@ -115,12 +115,16 @@ def test_persistent_session_readonly_directory_rejects_writes(tmp_path):
 
 def test_persistent_session_survives_garbage_collection():
     # Regression test: every snippet runs inside the bootstrap loop's try
-    # block, so the first collection used to corrupt the resident VM. With the
-    # default limits that happened after about 38 of these runs.
+    # block, so the first collection used to corrupt the resident VM.
+    #
+    # Each run leaves 20 KB of garbage, so 400 of them fill the default heap
+    # more than twice over and force automatic collections. Those are paid for
+    # out of the fuel of whichever run triggers them, so this also checks that
+    # the default heap is small enough for the default fuel budget.
     session = MicroPythonSession()
     try:
         session.run("keep = [str(i) * 10 for i in range(200)]")
-        for _ in range(100):
+        for _ in range(400):
             session.run("data = [0] * 5000")
         session.run("import gc\ngc.collect()")
         result = session.run(
@@ -536,3 +540,16 @@ def test_persistent_session_guest_exit_reports_exit_code():
         assert info.value.exit_code == 3
     finally:
         session.close()
+
+
+def test_persistent_session_heap_is_sized_from_memory_bytes():
+    heap_size = "import gc\nprint(gc.mem_free() + gc.mem_alloc())"
+    for megabytes in (2, 16):
+        memory_bytes = megabytes * 1024 * 1024
+        session = MicroPythonSession(memory_bytes=memory_bytes, fuel=2_000_000_000)
+        try:
+            heap = int(session.run(heap_size).stdout)
+        finally:
+            session.close()
+
+        assert 0.95 * (memory_bytes - 400 * 1024) < heap < memory_bytes

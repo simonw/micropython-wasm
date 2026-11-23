@@ -136,9 +136,7 @@ def test_build_script_ignores_artifact_built_without_spill_pointers(tmp_path):
         build_script.find_wasm_artifact(tmp_path / "micropython", "wasi")
 
 
-def test_build_script_keeps_names_for_spill_pointers_then_strips(
-    tmp_path, monkeypatch
-):
+def test_build_script_keeps_names_for_spill_pointers_then_strips(tmp_path, monkeypatch):
     build_script = load_build_script()
     repo_dir = tmp_path / "micropython"
     build_dir = repo_dir / "ports" / "unix" / "build-wasi"
