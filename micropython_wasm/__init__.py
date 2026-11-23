@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable, Mapping, NoReturn, Optional
 
 DEFAULT_HOST_RESULT_BYTES = 256 * 1024
-DEFAULT_FUEL = 20_000_000
+DEFAULT_FUEL = 35_000_000
 
 __all__ = [
     "MicroPythonWasmError",

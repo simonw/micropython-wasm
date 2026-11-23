@@ -57,7 +57,7 @@ prompts. Use `--memory` to set the WebAssembly memory limit in bytes and
 `--fuel` to set the Wasmtime fuel budget:
 
 ```bash
-micropython-wasm --memory 33554432 --fuel 20000000 -c "print('hello')"
+micropython-wasm --memory 33554432 --fuel 35000000 -c "print('hello')"
 ```
 
 To use it in Python import code from the `micropython_wasm` package:
@@ -136,7 +136,7 @@ from micropython_wasm import run
 result = run(
     "print(sum(range(10)))",
     memory_bytes=16 * 1024 * 1024,
-    fuel=20_000_000,
+    fuel=35_000_000,
     wall_timeout_seconds=1.0,
     host_result_bytes=256 * 1024,
 )
@@ -203,7 +203,7 @@ function arguments as `run()`:
 ```python
 session = MicroPythonSession(
     memory_bytes=16 * 1024 * 1024,
-    fuel=20_000_000,
+    fuel=35_000_000,
     readonly_dir="fixtures",
     host_functions={"add": lambda a, b: a + b},
     host_result_bytes=256 * 1024,
@@ -267,7 +267,7 @@ session.close()
 ```python
 session = MicroPythonReplaySession(
     memory_bytes=16 * 1024 * 1024,
-    fuel=20_000_000,
+    fuel=35_000_000,
     wall_timeout_seconds=1.0,
     readonly_dir="fixtures",
     host_result_bytes=256 * 1024,
@@ -841,7 +841,10 @@ which crashed persistent sessions as soon as the garbage collector ran.
 
 The spilled artifact executes more WebAssembly instructions for the same Python
 code, so a given `fuel` budget goes less far than it did with the earlier
-artifact: a simple counting loop uses roughly 65% more fuel.
+artifact. Across a mix of small workloads the same code used between 1% and 65%
+more fuel, 36% on average, with tight interpreter loops at the high end. The
+default budget was raised from 20,000,000 to 35,000,000 to compensate, so code
+that fitted in the old default still fits.
 
 ## License
 
