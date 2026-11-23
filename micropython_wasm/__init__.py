@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import keyword
 import queue
 import struct
 import threading
@@ -260,10 +261,7 @@ class MicroPythonReplaySession:
             raise TypeError("register_function() expected a callable")
         name = name or getattr(func, "__name__", "")
 
-        if not name.isidentifier():
-            raise ValueError(
-                f"host function name is not a valid Python identifier: {name!r}"
-            )
+        _validate_host_function_name(name)
 
         self._host_functions[name] = func
         wrapper = _host_function_wrapper_code(name)
@@ -405,10 +403,7 @@ class MicroPythonSession:
             raise TypeError("register_function() expected a callable")
         name = name or getattr(func, "__name__", "")
 
-        if not name.isidentifier():
-            raise ValueError(
-                f"host function name is not a valid Python identifier: {name!r}"
-            )
+        _validate_host_function_name(name)
         if name == _SESSION_CONTROL_FUNCTION:
             raise ValueError(f"host function name is reserved: {name!r}")
 
@@ -766,6 +761,19 @@ def _marker_code(marker: str) -> str:
         "import sys as __micropython_wasm_sys\n"
         f"__micropython_wasm_sys.stdout.write({marker!r} + '\\n')"
     )
+
+
+def _validate_host_function_name(name: str) -> None:
+    """Reject names the guest could not define a wrapper function for."""
+
+    if not name.isidentifier():
+        raise ValueError(
+            f"host function name is not a valid Python identifier: {name!r}"
+        )
+    # str.isidentifier() is true for keywords, but "def class(...)" is a syntax
+    # error. MicroPython also refuses to bind __debug__.
+    if keyword.iskeyword(name) or name == "__debug__":
+        raise ValueError(f"host function name is a reserved word: {name!r}")
 
 
 def _host_function_wrapper_code(name: str) -> str:

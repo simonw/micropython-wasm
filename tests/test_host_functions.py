@@ -5,6 +5,7 @@ from typing import Callable, cast
 import pytest
 
 from micropython_wasm import (
+    MicroPythonReplaySession,
     MicroPythonSession,
     MicroPythonWasmError,
     default_wasm_path,
@@ -221,5 +222,35 @@ def test_session_function_registered_twice_before_start_uses_latest():
     session.register_function(lambda: "second", name="value")
     try:
         assert session.run("print(value())").stdout == "second\n"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    "session_class", [MicroPythonSession, MicroPythonReplaySession]
+)
+@pytest.mark.parametrize("name", ["class", "def", "None", "import", "__debug__"])
+def test_register_function_rejects_reserved_words(session_class, name):
+    session = session_class()
+    try:
+        with pytest.raises(ValueError, match="reserved word"):
+            session.register_function(lambda: None, name=name)
+        with pytest.raises(ValueError, match="reserved word"):
+            session_class(host_functions={name: lambda: None})
+
+        # The rejected name left nothing behind, so the session still works.
+        assert name not in session.host_functions
+        session.register_function(lambda: "fine", name="okay")
+        assert session.run("print(okay())").stdout == "fine\n"
+    finally:
+        session.close()
+
+
+def test_register_function_accepts_soft_keywords_and_builtin_names():
+    session = MicroPythonSession()
+    try:
+        session.register_function(lambda: "m", name="match")
+        session.register_function(lambda: "t", name="type")
+        assert session.run("print(match(), type())").stdout == "m t\n"
     finally:
         session.close()
