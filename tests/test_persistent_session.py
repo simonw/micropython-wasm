@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from micropython_wasm import (
@@ -13,6 +15,26 @@ pytestmark = pytest.mark.skipif(
     not default_wasm_path().exists(),
     reason="packaged MicroPython WASI artifact is not built",
 )
+
+
+def run_with_deadline(session, code, seconds=30):
+    """Run code in a session, failing instead of hanging if it never returns."""
+
+    outcome = {}
+
+    def target():
+        try:
+            outcome["result"] = session.run(code)
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), f"session.run() did not return in {seconds}s"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
 
 
 def test_persistent_session_keeps_real_resident_state_without_replay():
@@ -118,6 +140,60 @@ def test_persistent_session_guest_exception_does_not_poison_state():
         assert session.run("print(x)").stdout == "2\n"
     finally:
         session.close()
+
+
+@pytest.mark.parametrize(
+    ("code", "exit_code"),
+    [
+        ("import sys\nsys.exit()", 0),
+        ("raise SystemExit", 0),
+        ("raise SystemExit(0)", 0),
+        ("import sys\nsys.exit(3)", 3),
+    ],
+)
+def test_persistent_session_guest_exit_does_not_hang_run(code, exit_code):
+    session = MicroPythonSession()
+    try:
+        assert session.run("x = 1\nprint(x)").stdout == "1\n"
+        with pytest.raises(
+            MicroPythonWasmError, match=f"stopped: guest exited with code {exit_code}"
+        ):
+            run_with_deadline(session, code)
+
+        # The VM is gone, so later runs fail promptly as well.
+        with pytest.raises(
+            MicroPythonWasmError, match=f"stopped: guest exited with code {exit_code}"
+        ):
+            run_with_deadline(session, "print(x)")
+    finally:
+        session.close()
+
+    assert session._thread is not None
+    assert not session._thread.is_alive()
+
+
+def test_persistent_session_waiting_run_is_released_when_session_closes():
+    # A run() that slipped past the closed check, and queued its request after
+    # the guest loop was told to close, must not wait for a reply that can
+    # never come.
+    session = MicroPythonSession()
+    session.run("x = 1")
+    session.close()
+
+    outcome = {}
+
+    def target():
+        try:
+            session._wait_for_result("never-answered")
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(30)
+
+    assert not thread.is_alive()
+    assert isinstance(outcome["error"], MicroPythonSessionClosed)
 
 
 def test_persistent_session_host_function_exception_can_be_caught():

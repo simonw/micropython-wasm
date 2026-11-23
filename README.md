@@ -225,6 +225,11 @@ Fuel is refreshed for each `session.run()` request. If a snippet exhausts fuel
 or otherwise traps the guest, the background VM stops and the session should be
 discarded.
 
+Guest code that exits the VM, for example with `sys.exit()` or
+`raise SystemExit`, also ends the session. That `session.run()` call and any
+later ones raise `MicroPythonWasmError` with a message such as
+`MicroPythonSession stopped: guest exited with code 0`.
+
 ### `MicroPythonReplaySession(...)`
 
 Create a transcript-backed session object with the same basic `run()` and

@@ -6,7 +6,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, NoReturn, Optional
 
 DEFAULT_HOST_RESULT_BYTES = 256 * 1024
 DEFAULT_FUEL = 20_000_000
@@ -297,6 +297,7 @@ class MicroPythonSession:
         self._ensure_started()
 
         with self._run_lock:
+            self._raise_if_stopped()
             request_id = uuid.uuid4().hex
             if self._pending_preamble:
                 code = "\n\n".join([*self._pending_preamble, code])
@@ -309,14 +310,7 @@ class MicroPythonSession:
 
             self._request_queue.put({"op": "run", "id": request_id, "code": code})
 
-            while True:
-                self._raise_thread_error_if_any()
-                try:
-                    result = self._result_queue.get(timeout=0.05)
-                except queue.Empty:
-                    continue
-                if result.get("id") == request_id:
-                    break
+            result = self._wait_for_result(request_id)
 
             with self._callback_lock:
                 stdout = b"".join(self._stdout_parts).decode("utf-8", "replace")
@@ -363,11 +357,35 @@ class MicroPythonSession:
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
         self._thread.start()
 
-    def _raise_thread_error_if_any(self) -> None:
+    def _wait_for_result(self, request_id: str) -> dict[str, object]:
+        while True:
+            try:
+                result = self._result_queue.get(timeout=0.05)
+            except queue.Empty:
+                if self._thread is not None and self._thread.is_alive():
+                    continue
+                # The guest thread has finished, so anything it reported is
+                # already queued. If nothing is, the VM stopped without
+                # answering this request and no answer will ever arrive.
+                try:
+                    result = self._result_queue.get_nowait()
+                except queue.Empty:
+                    self._raise_stopped()
+            if result.get("id") == request_id:
+                return result
+
+    def _raise_if_stopped(self) -> None:
+        if self._thread is not None and not self._thread.is_alive():
+            self._raise_stopped()
+
+    def _raise_stopped(self) -> NoReturn:
         if self._thread_error is not None:
             raise MicroPythonWasmError(
                 f"MicroPythonSession stopped: {self._thread_error}"
             )
+        if self._closed:
+            raise MicroPythonSessionClosed("MicroPythonSession is closed")
+        raise MicroPythonWasmError("MicroPythonSession stopped: guest exited")
 
     def _thread_main(self) -> None:
         try:
@@ -377,6 +395,12 @@ class MicroPythonSession:
             exc.__cause__ = None
             exc.__context__ = None
             self._thread_error = exc
+        else:
+            if not self._closed:
+                # The VM ended without being asked to, for example because
+                # guest code called sys.exit(). Record that so callers waiting
+                # in run() are told instead of waiting forever.
+                self._thread_error = MicroPythonWasmError("guest exited with code 0")
 
     def _run_bootstrap(self) -> None:
         try:
