@@ -343,7 +343,16 @@ def test_garbage_collection_inside_try_block_does_not_corrupt_vm(code):
     # Regression test: an artifact built without "wasm-opt --spill-pointers"
     # hides pointers held in WebAssembly locals from the garbage collector, so
     # a collection inside a try block freed objects that were still in use.
-    result = run(code, fuel=GC_PRESSURE_FUEL, wall_timeout_seconds=None)
+    #
+    # The memory limit is pinned at 1 MB so the heap is far smaller than the
+    # 3 MB each case allocates. Without that, a larger default heap would let
+    # these run without a single collection and they would test nothing.
+    result = run(
+        code,
+        memory_bytes=1024 * 1024,
+        fuel=GC_PRESSURE_FUEL,
+        wall_timeout_seconds=None,
+    )
 
     assert result.stdout == "True\n"
     assert result.stderr == ""
