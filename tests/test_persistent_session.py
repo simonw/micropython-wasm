@@ -89,6 +89,25 @@ def test_persistent_session_readonly_directory_rejects_writes(tmp_path):
     assert [path.name for path in tmp_path.iterdir()] == ["hello.txt"]
 
 
+def test_persistent_session_survives_garbage_collection():
+    # Regression test: every snippet runs inside the bootstrap loop's try
+    # block, so the first collection used to corrupt the resident VM. With the
+    # default limits that happened after about 38 of these runs.
+    session = MicroPythonSession()
+    try:
+        session.run("keep = [str(i) * 10 for i in range(200)]")
+        for _ in range(100):
+            session.run("data = [0] * 5000")
+        session.run("import gc\ngc.collect()")
+        result = session.run(
+            "print(all(keep[i] == str(i) * 10 for i in range(200)), len(data))"
+        )
+    finally:
+        session.close()
+
+    assert result.stdout == "True 5000\n"
+
+
 def test_persistent_session_guest_exception_does_not_poison_state():
     session = MicroPythonSession()
     try:

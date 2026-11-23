@@ -630,10 +630,14 @@ It:
    `pull/13676/head`.
 3. Builds `mpy-cross`.
 4. Runs `make submodules` for `ports/unix`.
-5. Builds `ports/unix VARIANT=wasi`.
+5. Builds `ports/unix VARIANT=wasi` with `STRIP=`, so the binary keeps its
+   name section until the Binaryen passes have run.
 6. Includes the bundled `host` user C module by default.
-7. Finds the best wasm artifact.
-8. Copies it to `micropython_wasm/artifacts/micropython-wasi.wasm`.
+7. Strips the result with `wasm-opt --strip-debug --strip-producers`.
+8. Finds the best wasm artifact.
+9. Copies it to `micropython_wasm/artifacts/micropython-wasi.wasm`.
+
+The build needs `wasi-sdk` 25.0 and Binaryen's `wasm-opt` on `PATH`.
 
 ### macOS ARM64 Setup
 
@@ -677,6 +681,28 @@ uv run python scripts/build_micropython_wasi.py \
   --wasi-sdk /tmp/wasi-sdk-25.0-arm64-macos
 ```
 
+### Linux x86_64 Setup
+
+Download `wasi-sdk` 25.0 and Binaryen, then put `wasm-opt` on `PATH`:
+
+```bash
+curl -L -o /tmp/wasi-sdk-25.0-x86_64-linux.tar.gz \
+  https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+tar -xzf /tmp/wasi-sdk-25.0-x86_64-linux.tar.gz -C /tmp
+curl -L -o /tmp/binaryen-version_130-x86_64-linux.tar.gz \
+  https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz
+tar -xzf /tmp/binaryen-version_130-x86_64-linux.tar.gz -C /tmp
+export PATH="/tmp/binaryen-version_130/bin:$PATH"
+```
+
+Build the artifact:
+
+```bash
+uv run python scripts/build_micropython_wasi.py \
+  --ref pull/13676/head \
+  --wasi-sdk /tmp/wasi-sdk-25.0-x86_64-linux
+```
+
 ### Useful Build Options
 
 - `--repo-url`: alternate MicroPython repository.
@@ -700,20 +726,30 @@ the experimental branch currently trips this Apple Clang warning while using
 
 The script prefers artifacts in this order:
 
-1. `build-wasi/micropython.spilled.exnref`
-2. `build-wasi/micropython.exnref`
+1. `build-wasi/micropython.spilled.exnref.stripped`
+2. `build-wasi/micropython.spilled.exnref`
 3. `build-wasi/micropython.wasm`
 4. `build-wasi/micropython`
 
-The current local build produced:
+A WASI build produces:
 
 ```text
 /tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython
-/tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython.exnref
+/tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython.spilled
+/tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython.spilled.exnref
+/tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython.spilled.exnref.stripped
 micropython_wasm/artifacts/micropython-wasi.wasm
 ```
 
-The copied package artifact is the `micropython.exnref` output.
+The copied package artifact is the `micropython.spilled.exnref.stripped`
+output.
+
+`build-wasi/micropython.exnref`, the result of translating exceptions without
+running `--spill-pointers` first, is never selected. WASI gives MicroPython no
+way to scan WebAssembly locals for garbage collection roots, so the upstream
+build relies on `wasm-opt --spill-pointers` to copy them to the linear memory
+stack. An artifact built without that pass corrupts itself the first time a
+collection happens inside a `try` block.
 
 ## Testing
 
@@ -775,8 +811,10 @@ micropython_wasm/artifacts/micropython-wasi.wasm
 ```
 
 That artifact was built from MicroPython PR `#13676`, using the PR ref
-`pull/13676/head`. MicroPython's WASI Unix variant is still experimental
-upstream, so this package should also be treated as experimental.
+`pull/13676/head` at commit `3f6d144cb8eeb8e8bd9fceab525c2e80fbf4b36b`, with
+`wasi-sdk` 25.0 and Binaryen 130 on Linux x86_64. MicroPython's WASI Unix
+variant is still experimental upstream, so this package should also be treated
+as experimental.
 
 The test suite verifies the bundled artifact against arithmetic, strings,
 bytes, collections, comprehensions, functions, closures, recursion, classes,
@@ -785,12 +823,17 @@ isolation, read-only file access, and fuel interruption. It also verifies both
 stateful session APIs: the transcript-backed `MicroPythonReplaySession` and the
 persistent background-thread `MicroPythonSession`.
 
-One important build caveat: the PR's full post-link Binaryen pipeline currently
-fails here at `wasm-opt --spill-pointers` with Binaryen 130. The artifact in this
-repository uses the successful `wasm-opt --translate-to-exnref` postprocess
-instead. Simple and moderately broad Python execution works under Wasmtime, but
-this should be stress-tested before relying on it for hostile or long-running
-code.
+One important build caveat: `wasm-opt --spill-pointers` fails with
+`getStackSpace: failed to find the stack pointer` if the linked binary has
+already been stripped, because Binaryen locates `__stack_pointer` through the
+name section. The build script therefore passes `STRIP=` to the MicroPython
+build and strips the artifact itself after the Binaryen passes. Earlier
+releases of this package shipped an artifact that skipped `--spill-pointers`,
+which crashed persistent sessions as soon as the garbage collector ran.
+
+The spilled artifact executes more WebAssembly instructions for the same Python
+code, so a given `fuel` budget goes less far than it did with the earlier
+artifact: a simple counting loop uses roughly 65% more fuel.
 
 ## License
 

@@ -285,6 +285,65 @@ def test_readonly_preopened_directory_is_not_modified(tmp_path, code):
     assert (tmp_path / "hello.txt").read_bytes() == b"hello from wasi\n"
 
 
+GC_PRESSURE_FUEL = 2_000_000_000
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # Module-level try block around ~3 MB of short-lived allocations, which
+        # forces several collections of the ~1 MB MicroPython heap.
+        """
+keep = [str(i) * 10 for i in range(200)]
+try:
+    for i in range(3000):
+        x = bytearray(1000)
+except Exception as ex:
+    print("unexpected", ex)
+print(all(keep[i] == str(i) * 10 for i in range(200)))
+""",
+        # The allocating code runs in a callee of the frame holding the try.
+        """
+keep = [str(i) * 10 for i in range(200)]
+
+def work():
+    for i in range(3000):
+        x = bytearray(1000)
+
+try:
+    work()
+except Exception as ex:
+    print("unexpected", ex)
+print(all(keep[i] == str(i) * 10 for i in range(200)))
+""",
+        # Nested try/finally frames above the allocating code.
+        """
+keep = [str(i) * 10 for i in range(200)]
+
+def work(depth):
+    if depth:
+        try:
+            return work(depth - 1)
+        finally:
+            pass
+    for i in range(3000):
+        x = bytearray(1000)
+
+work(3)
+print(all(keep[i] == str(i) * 10 for i in range(200)))
+""",
+    ],
+)
+def test_garbage_collection_inside_try_block_does_not_corrupt_vm(code):
+    # Regression test: an artifact built without "wasm-opt --spill-pointers"
+    # hides pointers held in WebAssembly locals from the garbage collector, so
+    # a collection inside a try block freed objects that were still in use.
+    result = run(code, fuel=GC_PRESSURE_FUEL, wall_timeout_seconds=None)
+
+    assert result.stdout == "True\n"
+    assert result.stderr == ""
+
+
 def test_low_fuel_interrupts_infinite_loop():
     with pytest.raises(MicroPythonWasmError, match="guest trapped"):
         run("while True:\n    pass", fuel=50_000, wall_timeout_seconds=None)
