@@ -74,6 +74,21 @@ def test_persistent_session_does_not_replay_file_side_effects(tmp_path):
     assert counter["count"] == 1
 
 
+def test_persistent_session_readonly_directory_rejects_writes(tmp_path):
+    (tmp_path / "hello.txt").write_text("hello\n", newline="\n")
+    session = MicroPythonSession(readonly_dir=tmp_path)
+    try:
+        assert session.run("print(open('/input/hello.txt').read())").stdout == (
+            "hello\n\n"
+        )
+        with pytest.raises(MicroPythonWasmError, match="OSError"):
+            session.run('open("/input/new.txt", "w").write("nope")')
+    finally:
+        session.close()
+
+    assert [path.name for path in tmp_path.iterdir()] == ["hello.txt"]
+
+
 def test_persistent_session_guest_exception_does_not_poison_state():
     session = MicroPythonSession()
     try:

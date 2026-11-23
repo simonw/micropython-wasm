@@ -265,6 +265,26 @@ def test_readonly_preopened_directory_rejects_writes(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        'open("/input/new.txt", "w").write("nope")',
+        'open("/input/hello.txt", "a").write("more")',
+        'import os\nos.remove("/input/hello.txt")',
+        'import os\nos.rename("/input/hello.txt", "/input/renamed.txt")',
+        'import os\nos.mkdir("/input/subdir")',
+    ],
+)
+def test_readonly_preopened_directory_is_not_modified(tmp_path, code):
+    (tmp_path / "hello.txt").write_text("hello from wasi\n", newline="\n")
+
+    with pytest.raises(MicroPythonWasmError, match="guest exited with code 1"):
+        run(code, readonly_dir=tmp_path, wall_timeout_seconds=None)
+
+    assert [path.name for path in tmp_path.iterdir()] == ["hello.txt"]
+    assert (tmp_path / "hello.txt").read_bytes() == b"hello from wasi\n"
+
+
 def test_low_fuel_interrupts_infinite_loop():
     with pytest.raises(MicroPythonWasmError, match="guest trapped"):
         run("while True:\n    pass", fuel=50_000, wall_timeout_seconds=None)

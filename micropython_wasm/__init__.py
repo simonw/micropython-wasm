@@ -745,17 +745,10 @@ def _configure_readonly_dir(wasi, readonly_dir: str | Path | None, error_cls) ->
     readonly_path = Path(readonly_dir)
     if not readonly_path.is_dir():
         raise error_cls(f"readonly_dir is not a directory: {readonly_path}")
-    try:
-        from wasmtime import DirPerms, FilePerms
-    except ImportError:
-        wasi.preopen_dir(str(readonly_path), "/input")
-    else:
-        wasi.preopen_dir(
-            str(readonly_path),
-            "/input",
-            dir_perms=DirPerms.READ_ONLY,
-            file_perms=FilePerms.READ_ONLY,
-        )
+    # wasmtime 48 replaced the DirPerms/FilePerms arguments with fs_mutable.
+    # Always pass it explicitly: the default is a writable preopen, so an
+    # unsupported wasmtime must fail here rather than fall back to read-write.
+    wasi.preopen_dir(str(readonly_path), "/input", fs_mutable=False)
 
 
 def _define_host_call(
