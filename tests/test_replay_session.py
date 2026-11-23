@@ -101,3 +101,14 @@ def test_session_context_manager_closes_session():
     assert session.closed
     with pytest.raises(MicroPythonSessionClosed):
         session.run("print(x)")
+
+
+def test_session_failure_reports_only_output_from_failed_snippet():
+    session = MicroPythonReplaySession(wall_timeout_seconds=None)
+    session.run("print('first')\nx = 1")
+
+    with pytest.raises(MicroPythonWasmError) as info:
+        session.run("print('second', x)\nraise KeyError('missing')")
+
+    assert info.value.stdout == "second 1\n"
+    assert info.value.stderr.splitlines()[-1] == "KeyError: missing"

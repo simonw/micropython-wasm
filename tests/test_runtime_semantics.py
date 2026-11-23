@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from micropython_wasm import MicroPythonWasmError, default_wasm_path, run
@@ -230,12 +232,15 @@ def test_standard_library_subset(code, expected):
 
 def test_instances_are_fresh_between_runs():
     assert run_stdout("x = 42\nprint(x)") == "42\n"
-    assert run_stdout("""
+    assert (
+        run_stdout("""
 try:
     print(x)
 except NameError:
     print("missing")
-""") == "missing\n"
+""")
+        == "missing\n"
+    )
 
 
 def test_readonly_preopened_directory_allows_reading(tmp_path):
@@ -265,6 +270,161 @@ def test_readonly_preopened_directory_rejects_writes(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        'open("/input/new.txt", "w").write("nope")',
+        'open("/input/hello.txt", "a").write("more")',
+        'import os\nos.remove("/input/hello.txt")',
+        'import os\nos.rename("/input/hello.txt", "/input/renamed.txt")',
+        'import os\nos.mkdir("/input/subdir")',
+    ],
+)
+def test_readonly_preopened_directory_is_not_modified(tmp_path, code):
+    (tmp_path / "hello.txt").write_text("hello from wasi\n", newline="\n")
+
+    with pytest.raises(MicroPythonWasmError, match="guest exited with code 1"):
+        run(code, readonly_dir=tmp_path, wall_timeout_seconds=None)
+
+    assert [path.name for path in tmp_path.iterdir()] == ["hello.txt"]
+    assert (tmp_path / "hello.txt").read_bytes() == b"hello from wasi\n"
+
+
+GC_PRESSURE_FUEL = 2_000_000_000
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # Module-level try block around ~3 MB of short-lived allocations, which
+        # forces several collections of the ~1 MB MicroPython heap.
+        """
+keep = [str(i) * 10 for i in range(200)]
+try:
+    for i in range(3000):
+        x = bytearray(1000)
+except Exception as ex:
+    print("unexpected", ex)
+print(all(keep[i] == str(i) * 10 for i in range(200)))
+""",
+        # The allocating code runs in a callee of the frame holding the try.
+        """
+keep = [str(i) * 10 for i in range(200)]
+
+def work():
+    for i in range(3000):
+        x = bytearray(1000)
+
+try:
+    work()
+except Exception as ex:
+    print("unexpected", ex)
+print(all(keep[i] == str(i) * 10 for i in range(200)))
+""",
+        # Nested try/finally frames above the allocating code.
+        """
+keep = [str(i) * 10 for i in range(200)]
+
+def work(depth):
+    if depth:
+        try:
+            return work(depth - 1)
+        finally:
+            pass
+    for i in range(3000):
+        x = bytearray(1000)
+
+work(3)
+print(all(keep[i] == str(i) * 10 for i in range(200)))
+""",
+    ],
+)
+def test_garbage_collection_inside_try_block_does_not_corrupt_vm(code):
+    # Regression test: an artifact built without "wasm-opt --spill-pointers"
+    # hides pointers held in WebAssembly locals from the garbage collector, so
+    # a collection inside a try block freed objects that were still in use.
+    #
+    # The memory limit is pinned at 1 MB so the heap is far smaller than the
+    # 3 MB each case allocates. Without that, a larger default heap would let
+    # these run without a single collection and they would test nothing.
+    result = run(
+        code,
+        memory_bytes=1024 * 1024,
+        fuel=GC_PRESSURE_FUEL,
+        wall_timeout_seconds=None,
+    )
+
+    assert result.stdout == "True\n"
+    assert result.stderr == ""
+
+
+# The guest asks to block for 30 seconds. If blocking calls stopped honouring
+# the wall timeout these tests would take that long and then fail, rather than
+# hang the test run.
+@pytest.mark.parametrize(
+    "code",
+    [
+        # One long call into the host.
+        "import time\ntime.sleep(30)",
+        # Many short calls into the host with WebAssembly code in between, so
+        # the deadline can arrive in either place.
+        "import select\nselect.poll().poll(30000)",
+        "import time\nwhile True:\n    time.sleep_ms(1)",
+    ],
+)
+def test_wall_timeout_interrupts_blocking_guest(code):
+    started = time.monotonic()
+    with pytest.raises(
+        MicroPythonWasmError, match="guest trapped: wall-clock timeout exceeded"
+    ):
+        run(code, wall_timeout_seconds=0.5)
+
+    assert time.monotonic() - started < 15
+
+
+def test_sleep_within_wall_timeout_completes():
+    result = run(
+        """
+import time
+start = time.ticks_ms()
+time.sleep(0.2)
+time.sleep_ms(100)
+time.sleep(0)
+print(time.ticks_diff(time.ticks_ms(), start) >= 290)
+""",
+        wall_timeout_seconds=30,
+    )
+
+    assert result.stdout == "True\n"
+
+
+def test_sleep_without_wall_timeout_completes():
+    result = run(
+        "import time\ntime.sleep(0.2)\nprint('awake')", wall_timeout_seconds=None
+    )
+
+    assert result.stdout == "awake\n"
+
+
+def test_poll_reports_stdio_ready_without_blocking():
+    started = time.monotonic()
+    result = run(
+        """
+import select, sys
+poller = select.poll()
+poller.register(sys.stdin, select.POLLIN)
+poller.register(sys.stdout, select.POLLOUT)
+print(sorted(event for _, event in poller.poll(30000)))
+print(repr(sys.stdin.read()))
+print(select.poll().poll(50))
+""",
+        wall_timeout_seconds=None,
+    )
+
+    assert result.stdout == "[1, 4]\n''\n[]\n"
+    assert time.monotonic() - started < 15
+
+
 def test_low_fuel_interrupts_infinite_loop():
     with pytest.raises(MicroPythonWasmError, match="guest trapped"):
         run("while True:\n    pass", fuel=50_000, wall_timeout_seconds=None)
@@ -275,3 +435,145 @@ def test_uncaught_guest_exception_is_reported_as_guest_failure():
         MicroPythonWasmError, match="guest exited with code 1|guest trapped"
     ):
         run('raise ValueError("boom")', wall_timeout_seconds=None)
+
+
+def test_uncaught_guest_exception_keeps_output_and_traceback():
+    with pytest.raises(MicroPythonWasmError, match="guest exited with code 1") as info:
+        run(
+            """
+print("before")
+
+def fail():
+    raise ValueError("boom")
+
+fail()
+""",
+            wall_timeout_seconds=None,
+        )
+
+    assert info.value.stdout == "before\n"
+    assert info.value.stderr.splitlines() == [
+        "Traceback (most recent call last):",
+        '  File "<stdin>", line 7, in <module>',
+        '  File "<stdin>", line 5, in fail',
+        "ValueError: boom",
+    ]
+
+
+def test_trapped_guest_keeps_output_written_before_the_trap():
+    with pytest.raises(MicroPythonWasmError, match="guest trapped") as info:
+        run("print('before')\nwhile True:\n    pass", wall_timeout_seconds=None)
+
+    assert info.value.stdout == "before\n"
+    assert info.value.stderr == ""
+
+
+def test_errors_raised_before_guest_code_runs_have_empty_output(tmp_path):
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("print(1)", wasm_path=tmp_path / "missing.wasm")
+
+    assert info.value.stdout == ""
+    assert info.value.stderr == ""
+    assert MicroPythonWasmError("plain").stdout == ""
+
+
+def test_error_exit_code_reports_how_the_guest_exited():
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("import sys\nsys.exit(3)", wall_timeout_seconds=None)
+    assert info.value.exit_code == 3
+
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("raise ValueError('boom')", wall_timeout_seconds=None)
+    assert info.value.exit_code == 1
+
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("while True:\n    pass", fuel=200_000, wall_timeout_seconds=None)
+    assert info.value.exit_code is None
+
+
+HEAP_SIZE = "import gc\nprint(gc.mem_free() + gc.mem_alloc())"
+MB = 1024 * 1024
+
+
+def heap_size(prefix: str = "", **kwargs) -> int:
+    # gc.mem_free() walks the whole heap, which takes fuel and time in
+    # proportion to its size, so these runs get plenty of fuel and no wall
+    # timeout. A slow CI machine must not turn them into timeouts.
+    result = run(
+        prefix + HEAP_SIZE,
+        fuel=GC_PRESSURE_FUEL,
+        wall_timeout_seconds=None,
+        **kwargs,
+    )
+    return int(result.stdout)
+
+
+@pytest.mark.parametrize("megabytes", [1, 2, 8, 32])
+def test_heap_is_sized_from_memory_bytes(megabytes):
+    memory_bytes = megabytes * MB
+    heap = heap_size(memory_bytes=memory_bytes)
+
+    # Nearly all of the limit is heap. The rest is the 384 KB reserved for the
+    # runtime and the couple of percent MicroPython's collector keeps for its
+    # own bookkeeping.
+    assert 0.95 * (memory_bytes - 400 * 1024) < heap < memory_bytes
+
+
+def test_default_memory_limit_gives_a_heap_of_several_megabytes():
+    from micropython_wasm import DEFAULT_MEMORY_BYTES
+
+    heap = heap_size()
+
+    assert DEFAULT_MEMORY_BYTES == 4 * MB
+    assert 3.5 * MB < heap < DEFAULT_MEMORY_BYTES
+
+
+def test_guest_can_fill_the_heap_and_recover():
+    result = run(
+        """
+import gc
+chunks = []
+try:
+    while True:
+        chunks.append(bytearray(10000))
+except MemoryError:
+    count = len(chunks)
+    chunks = None
+    gc.collect()
+print(count * 10000 > 3 * 1024 * 1024, sorted([3, 1, 2]))
+""",
+        memory_bytes=4 * MB,
+        fuel=GC_PRESSURE_FUEL,
+        wall_timeout_seconds=None,
+    )
+
+    assert result.stdout == "True [1, 2, 3]\n"
+
+
+def test_code_size_is_taken_out_of_the_heap():
+    padding = "#" + "x" * MB + "\n"
+
+    small = heap_size(memory_bytes=4 * MB)
+    large = heap_size(padding, memory_bytes=4 * MB)
+
+    assert 0.95 * MB < small - large < 1.05 * MB
+
+
+def test_memory_bytes_too_small_for_runtime_and_code_is_rejected():
+    with pytest.raises(ValueError, match="memory_bytes must be at least 524288"):
+        run("print(1)", memory_bytes=256 * 1024)
+
+    with pytest.raises(ValueError, match="for the code"):
+        run("#" + "x" * (2 * MB) + "\nprint(1)", memory_bytes=2 * MB)
+
+    result = run("print(1)", memory_bytes=524288, wall_timeout_seconds=None)
+    assert result.stdout == "1\n"
+
+
+def test_wall_timeout_reports_the_same_error_for_executing_guest():
+    # A guest that never calls into the host is stopped by epoch interruption
+    # rather than by a blocking call noticing the deadline.
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("while True:\n    pass", fuel=10**12, wall_timeout_seconds=0.3)
+
+    assert str(info.value) == "guest trapped: wall-clock timeout exceeded"

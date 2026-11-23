@@ -8,7 +8,7 @@ authors = [{name = "Simon Willison"}]
 license = "Apache-2.0"
 classifiers = []
 dependencies = [
-    "wasmtime",
+    "wasmtime>=48",
 ]
 
 [dependency-groups]

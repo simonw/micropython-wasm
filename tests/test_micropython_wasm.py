@@ -107,3 +107,93 @@ def test_build_script_accepts_wasm_artifact_without_extension(tmp_path):
     artifact.write_bytes(b"\0asm")
 
     assert build_script.find_wasm_artifact(repo_dir, "wasi") == artifact
+
+
+def test_build_script_prefers_stripped_spilled_artifact(tmp_path):
+    build_script = load_build_script()
+    build_dir = tmp_path / "micropython" / "ports" / "unix" / "build-wasi"
+    build_dir.mkdir(parents=True)
+    for name in (
+        "micropython",
+        "micropython.exnref",
+        "micropython.spilled.exnref",
+        "micropython.spilled.exnref.stripped",
+    ):
+        (build_dir / name).write_bytes(b"\0asm")
+
+    found = build_script.find_wasm_artifact(tmp_path / "micropython", "wasi")
+
+    assert found == build_dir / "micropython.spilled.exnref.stripped"
+
+
+def test_build_script_ignores_artifact_built_without_spill_pointers(tmp_path):
+    build_script = load_build_script()
+    build_dir = tmp_path / "micropython" / "ports" / "unix" / "build-wasi"
+    build_dir.mkdir(parents=True)
+    (build_dir / "micropython.exnref").write_bytes(b"\0asm")
+
+    with pytest.raises(build_script.BuildError):
+        build_script.find_wasm_artifact(tmp_path / "micropython", "wasi")
+
+
+def test_build_script_keeps_names_for_spill_pointers_then_strips(tmp_path, monkeypatch):
+    build_script = load_build_script()
+    repo_dir = tmp_path / "micropython"
+    build_dir = repo_dir / "ports" / "unix" / "build-wasi"
+    commands: list[list[str]] = []
+
+    def fake_run_command(command, *, cwd=None, env=None):
+        commands.append(command)
+        if command[0] == "make" and "-j1" in command and "VARIANT=wasi" in command:
+            build_dir.mkdir(parents=True, exist_ok=True)
+            (build_dir / "micropython.spilled.exnref").write_bytes(b"\0asm")
+
+    monkeypatch.setattr(build_script, "run_command", fake_run_command)
+
+    build_script.build_micropython(repo_dir, "wasi", 1, [], None, None)
+
+    unix_makes = [c for c in commands if c[0] == "make" and "VARIANT=wasi" in c]
+    assert unix_makes and all("STRIP=" in c for c in unix_makes)
+    assert commands[-1] == [
+        "wasm-opt",
+        "--strip-debug",
+        "--strip-producers",
+        "-o",
+        str(build_dir / "micropython.spilled.exnref.stripped"),
+        str(build_dir / "micropython.spilled.exnref"),
+    ]
+
+
+def test_build_script_fails_when_spill_pointers_output_is_missing(
+    tmp_path, monkeypatch
+):
+    build_script = load_build_script()
+    monkeypatch.setattr(build_script, "run_command", lambda *args, **kwargs: None)
+
+    with pytest.raises(build_script.BuildError, match="spill-pointers"):
+        build_script.build_micropython(
+            tmp_path / "micropython", "wasi", 1, [], None, None
+        )
+
+
+def test_wall_timeout_does_not_include_module_compilation(monkeypatch):
+    if not default_wasm_path().exists():
+        pytest.skip("packaged MicroPython WASI artifact is not built")
+
+    import time
+
+    import wasmtime
+
+    real_from_file = wasmtime.Module.from_file
+
+    def slow_from_file(*args, **kwargs):
+        # Stand in for a machine that takes longer to compile the module than
+        # the whole wall timeout allows.
+        time.sleep(0.6)
+        return real_from_file(*args, **kwargs)
+
+    monkeypatch.setattr(wasmtime.Module, "from_file", slow_from_file)
+
+    result = run("print('ran')", wall_timeout_seconds=0.3)
+
+    assert result.stdout == "ran\n"

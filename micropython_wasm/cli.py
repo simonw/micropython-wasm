@@ -5,14 +5,34 @@ import ast
 import codeop
 import sys
 from pathlib import Path
-from typing import Callable, Sequence, TextIO
+from typing import Callable, Protocol, Sequence, TextIO
 
-from . import DEFAULT_FUEL, MicroPythonSession, MicroPythonWasmError, RunResult, run
+from . import (
+    DEFAULT_FUEL,
+    DEFAULT_MEMORY_BYTES,
+    DEFAULT_SESSION_WALL_TIMEOUT_SECONDS,
+    MicroPythonSession,
+    MicroPythonWasmError,
+    RunResult,
+    run,
+)
 
-DEFAULT_MEMORY_BYTES = 16 * 1024 * 1024
+DEFAULT_RUN_WALL_TIMEOUT_SECONDS = 1.0
+
+
+class ReplSession(Protocol):
+    """The parts of MicroPythonSession the REPL uses."""
+
+    @property
+    def stopped(self) -> bool: ...
+
+    def run(self, code: str) -> RunResult: ...
+
+    def close(self) -> None: ...
+
 
 Execute = Callable[..., RunResult]
-SessionFactory = Callable[..., MicroPythonSession]
+SessionFactory = Callable[..., ReplSession]
 
 
 def main(
@@ -45,6 +65,18 @@ def main(
         help=f"Wasmtime fuel budget per run (default: {DEFAULT_FUEL})",
     )
     parser.add_argument(
+        "--timeout",
+        type=_timeout_seconds,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "wall-clock limit in seconds, or 0 for no limit (default: "
+            f"{DEFAULT_RUN_WALL_TIMEOUT_SECONDS:g} for -c and files, "
+            f"{DEFAULT_SESSION_WALL_TIMEOUT_SECONDS:g} for each line entered "
+            "in the REPL)"
+        ),
+    )
+    parser.add_argument(
         "-c",
         dest="code",
         metavar="CODE",
@@ -60,15 +92,16 @@ def main(
     if args.code is not None and args.file is not None:
         parser.error("cannot use -c and a file at the same time")
 
+    options: dict[str, object] = {
+        "memory_bytes": args.memory_bytes,
+        "fuel": args.fuel,
+    }
+    if args.timeout is not None:
+        # Left out unless asked for, so each mode keeps its own default.
+        options["wall_timeout_seconds"] = args.timeout or None
+
     if args.code is not None:
-        return _run_code(
-            args.code,
-            execute,
-            stdout,
-            stderr,
-            memory_bytes=args.memory_bytes,
-            fuel=args.fuel,
-        )
+        return _run_code(args.code, execute, stdout, stderr, options)
 
     if args.file is not None:
         try:
@@ -76,23 +109,9 @@ def main(
         except OSError as exc:
             print(f"micropython-wasm: {exc}", file=stderr)
             return 1
-        return _run_code(
-            code,
-            execute,
-            stdout,
-            stderr,
-            memory_bytes=args.memory_bytes,
-            fuel=args.fuel,
-        )
+        return _run_code(code, execute, stdout, stderr, options)
 
-    return _repl(
-        stdin,
-        stdout,
-        stderr,
-        session_factory,
-        memory_bytes=args.memory_bytes,
-        fuel=args.fuel,
-    )
+    return _repl(stdin, stdout, stderr, session_factory, options)
 
 
 def _run_code(
@@ -100,13 +119,19 @@ def _run_code(
     execute: Execute,
     stdout: TextIO,
     stderr: TextIO,
-    *,
-    memory_bytes: int,
-    fuel: int,
+    options: dict[str, object],
 ) -> int:
     try:
-        result = execute(code, memory_bytes=memory_bytes, fuel=fuel)
+        result = execute(code, **options)
     except MicroPythonWasmError as exc:
+        # Show what the guest printed before it failed, including the
+        # traceback MicroPython writes to stderr for an uncaught exception.
+        stdout.write(exc.stdout)
+        stderr.write(exc.stderr)
+        if exc.exit_code is not None:
+            # The guest exited by itself, through sys.exit() or an uncaught
+            # exception. Pass its status on as a MicroPython binary would.
+            return exc.exit_code
         print(f"micropython-wasm: {exc}", file=stderr)
         return 1
 
@@ -119,12 +144,10 @@ def _repl(
     stdout: TextIO,
     stderr: TextIO,
     session_factory: SessionFactory,
-    *,
-    memory_bytes: int,
-    fuel: int,
+    options: dict[str, object],
 ) -> int:
     buffer: list[str] = []
-    session = session_factory(memory_bytes=memory_bytes, fuel=fuel)
+    session = session_factory(**options)
     try:
         while True:
             stdout.write("... " if buffer else ">>> ")
@@ -152,7 +175,25 @@ def _repl(
             try:
                 result = session.run(_repl_code(source))
             except MicroPythonWasmError as exc:
-                print(exc, file=stderr)
+                stdout.write(exc.stdout)
+                stderr.write(exc.stderr)
+                if session.stopped and exc.exit_code is not None:
+                    # Guest code exited the VM, for example with sys.exit().
+                    return exc.exit_code
+                # An uncaught guest exception already ends its traceback with
+                # the same "Type: message" line that the error carries.
+                if not exc.stderr.rstrip().endswith(str(exc)):
+                    print(_brief(exc), file=stderr)
+                if session.stopped:
+                    # A trap or timeout ends the VM. Carry on with a new one
+                    # rather than failing every line from here on.
+                    session.close()
+                    session = session_factory(**options)
+                    print(
+                        "micropython-wasm: session restarted, "
+                        "variables and imports were lost",
+                        file=stderr,
+                    )
                 continue
             _write_result(result, stdout, stderr)
     finally:
@@ -160,10 +201,22 @@ def _repl(
 
 
 def _source_is_complete(source: str) -> bool:
+    # "single" is the interactive grammar: a compound statement such as a def
+    # is only complete once it is followed by a blank line, so its body can
+    # span several lines.
     try:
-        return codeop.compile_command(source, symbol="exec") is not None
+        return codeop.compile_command(source, symbol="single") is not None
     except (OverflowError, SyntaxError, ValueError):
         return True
+
+
+def _brief(exc: MicroPythonWasmError) -> str:
+    """Reduce a Wasmtime trap, which comes with a wasm backtrace, to its cause."""
+
+    lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return str(exc)
+    return lines[-1]
 
 
 def _positive_int(value: str) -> int:
@@ -173,6 +226,16 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be an integer") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def _timeout_seconds(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number of seconds") from exc
+    if not 0 <= parsed < float("inf"):
+        raise argparse.ArgumentTypeError("must be zero or a positive number")
     return parsed
 
 

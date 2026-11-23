@@ -5,6 +5,7 @@ from typing import Callable, cast
 import pytest
 
 from micropython_wasm import (
+    MicroPythonReplaySession,
     MicroPythonSession,
     MicroPythonWasmError,
     default_wasm_path,
@@ -190,3 +191,66 @@ print(host.call("missing", "{}"))
     )
 
     assert result.stdout == '{"ok":false,"error":"KeyError: \'missing\'"}\n'
+
+
+def test_session_host_functions_survive_syntax_error_in_first_run():
+    session = MicroPythonSession(host_functions={"add": lambda a, b: a + b})
+    session.register_function(lambda value: value.upper(), name="shout")
+    try:
+        with pytest.raises(MicroPythonWasmError, match="SyntaxError"):
+            session.run("x = (")
+
+        assert session.run("print(add(1, 2), shout('hi'))").stdout == "3 HI\n"
+    finally:
+        session.close()
+
+
+def test_session_host_function_wrappers_do_not_shift_traceback_line_numbers():
+    session = MicroPythonSession(host_functions={"add": lambda a, b: a + b})
+    try:
+        with pytest.raises(MicroPythonWasmError, match="ValueError: boom") as info:
+            session.run("total = add(1, 2)\nraise ValueError('boom')")
+
+        assert '  File "<string>", line 2, in <module>' in info.value.stderr
+        assert session.run("print(total)").stdout == "3\n"
+    finally:
+        session.close()
+
+
+def test_session_function_registered_twice_before_start_uses_latest():
+    session = MicroPythonSession(host_functions={"value": lambda: "first"})
+    session.register_function(lambda: "second", name="value")
+    try:
+        assert session.run("print(value())").stdout == "second\n"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    "session_class", [MicroPythonSession, MicroPythonReplaySession]
+)
+@pytest.mark.parametrize("name", ["class", "def", "None", "import", "__debug__"])
+def test_register_function_rejects_reserved_words(session_class, name):
+    session = session_class()
+    try:
+        with pytest.raises(ValueError, match="reserved word"):
+            session.register_function(lambda: None, name=name)
+        with pytest.raises(ValueError, match="reserved word"):
+            session_class(host_functions={name: lambda: None})
+
+        # The rejected name left nothing behind, so the session still works.
+        assert name not in session.host_functions
+        session.register_function(lambda: "fine", name="okay")
+        assert session.run("print(okay())").stdout == "fine\n"
+    finally:
+        session.close()
+
+
+def test_register_function_accepts_soft_keywords_and_builtin_names():
+    session = MicroPythonSession()
+    try:
+        session.register_function(lambda: "m", name="match")
+        session.register_function(lambda: "t", name="type")
+        assert session.run("print(match(), type())").stdout == "m t\n"
+    finally:
+        session.close()

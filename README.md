@@ -53,12 +53,29 @@ uvx micropython-wasm --help
 ```
 
 The no-argument form starts a simple REPL with persistent state between
-prompts. Use `--memory` to set the WebAssembly memory limit in bytes and
-`--fuel` to set the Wasmtime fuel budget:
+prompts. As in the Python REPL, a block such as a `def` or a loop is finished
+with a blank line.
+
+Options:
+
+- `--memory BYTES`: WebAssembly memory limit, 4 MB by default. Nearly all of it
+  becomes the MicroPython heap. See [Resource Controls](#resource-controls).
+- `--fuel COUNT`: Wasmtime fuel budget for each run.
+- `--timeout SECONDS`: wall-clock limit. The default is 1 second for `-c` and
+  files and 10 seconds for each line entered in the REPL. `0` means no limit.
 
 ```bash
-micropython-wasm --memory 33554432 --fuel 20000000 -c "print('hello')"
+micropython-wasm --memory 8388608 --fuel 70000000 --timeout 5 -c "print('hello')"
 ```
+
+With `-c` or a file, the exit status is the one MicroPython exited with: 0 on
+success, 1 after an uncaught exception, whose traceback is printed, or the
+argument of `sys.exit()`. If the code is stopped for running out of fuel or
+time, a `micropython-wasm:` message is printed and the status is 1.
+
+In the REPL, `sys.exit()` leaves the REPL with that status. Code that runs out
+of fuel or time stops the MicroPython VM, so the REPL starts a new one and says
+so. Variables and imports from before that point are lost.
 
 To use it in Python import code from the `micropython_wasm` package:
 
@@ -135,8 +152,8 @@ from micropython_wasm import run
 
 result = run(
     "print(sum(range(10)))",
-    memory_bytes=16 * 1024 * 1024,
-    fuel=20_000_000,
+    memory_bytes=4 * 1024 * 1024,
+    fuel=35_000_000,
     wall_timeout_seconds=1.0,
     host_result_bytes=256 * 1024,
 )
@@ -147,10 +164,14 @@ Arguments:
 - `code`: MicroPython source code passed as `micropython -c <code>`.
 - `wasm_path`: optional path to a custom WASI MicroPython artifact. If omitted,
   `micropython_wasm/artifacts/micropython-wasi.wasm` is used.
-- `memory_bytes`: maximum WebAssembly linear memory for the store.
+- `memory_bytes`: maximum WebAssembly linear memory for the guest, 4 MB by
+  default. The MicroPython heap is sized to fill it, less about 0.4 MB for the
+  runtime and the size of the code. See [Resource Controls](#resource-controls).
 - `fuel`: Wasmtime fuel budget. Guest execution traps when it runs out.
-- `wall_timeout_seconds`: wall-clock timeout. Pass `None` to disable epoch
-  interruption.
+- `wall_timeout_seconds`: wall-clock timeout, 1 second by default. It covers
+  time the guest spends blocked in `time.sleep()` or `select.poll()` as well as
+  time spent executing, but not the time Wasmtime takes to compile the module
+  beforehand. Pass `None` to disable it.
 - `readonly_dir`: optional host directory to expose inside the guest as
   `/input`, with read-only WASI directory and file permissions.
 - `host_functions`: optional mapping of host function names to Python callables.
@@ -202,8 +223,9 @@ function arguments as `run()`:
 
 ```python
 session = MicroPythonSession(
-    memory_bytes=16 * 1024 * 1024,
-    fuel=20_000_000,
+    memory_bytes=4 * 1024 * 1024,
+    fuel=35_000_000,
+    wall_timeout_seconds=10.0,
     readonly_dir="fixtures",
     host_functions={"add": lambda a, b: a + b},
     host_result_bytes=256 * 1024,
@@ -218,12 +240,25 @@ Methods and properties:
 - `session.close()`: send a close message to the guest loop and reject further
   runs.
 - `session.closed`: `True` after `close()`.
+- `session.stopped`: `True` once the VM has stopped and the session can run no
+  more code, whether through a trap, a timeout, a guest exit or `close()`.
 - `session.host_functions`: copy of registered host functions.
 - Context manager support: `with MicroPythonSession() as session: ...`.
 
-Fuel is refreshed for each `session.run()` request. If a snippet exhausts fuel
-or otherwise traps the guest, the background VM stops and the session should be
-discarded.
+Fuel and the wall-clock timeout are refreshed for each `session.run()` request.
+The session default for `wall_timeout_seconds` is 10 seconds per request, where
+`run()` defaults to 1 second. Pass `None` to disable it. If a snippet exhausts
+fuel, runs past the timeout, or otherwise traps the guest, the background VM
+stops and the session should be discarded.
+
+`session.close()` also wakes a guest that is blocked in `time.sleep()`, so
+closing a session from another thread does not wait for the sleep to finish. A
+`session.run()` call that was in flight raises `MicroPythonWasmError`.
+
+Guest code that exits the VM, for example with `sys.exit()` or
+`raise SystemExit`, also ends the session. That `session.run()` call and any
+later ones raise `MicroPythonWasmError` with a message such as
+`MicroPythonSession stopped: guest exited with code 0`.
 
 ### `MicroPythonReplaySession(...)`
 
@@ -261,8 +296,8 @@ session.close()
 
 ```python
 session = MicroPythonReplaySession(
-    memory_bytes=16 * 1024 * 1024,
-    fuel=20_000_000,
+    memory_bytes=4 * 1024 * 1024,
+    fuel=35_000_000,
     wall_timeout_seconds=1.0,
     readonly_dir="fixtures",
     host_result_bytes=256 * 1024,
@@ -393,6 +428,11 @@ session = MicroPythonSession(
 print(session.run("print(format_name('Ada', last='Lovelace', uppercase=True))").stdout)
 ```
 
+A host function name must be a valid Python identifier that is not a reserved
+word such as `class` or `None`; anything else raises `ValueError`. The name
+`__session_exchange__` is reserved for the session's own control channel and
+cannot be registered with `MicroPythonSession`.
+
 Arguments and return values cross the WebAssembly boundary as JSON. Supported
 values are therefore JSON-compatible values: `None`, booleans, numbers, strings,
 lists, and dictionaries with string keys.
@@ -469,16 +509,39 @@ The package raises:
   missing Wasmtime support, or invalid preopened directories.
 - `ValueError` for invalid host-side resource limits.
 
-For example:
+When guest code fails, the `MicroPythonWasmError` carries what it wrote before
+the failure in `stdout` and `stderr`. For an uncaught guest exception `stderr`
+ends with the MicroPython traceback:
 
 ```python
 from micropython_wasm import MicroPythonWasmError, run
 
 try:
-    run('raise ValueError("boom")')
+    run('print("before")\nraise ValueError("boom")')
 except MicroPythonWasmError as ex:
     print(ex)
+    print(ex.stdout)
+    print(ex.stderr)
 ```
+
+Output:
+
+```text
+guest exited with code 1
+before
+
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+ValueError: boom
+```
+
+`MicroPythonSession.run()` raises with the guest exception as its message, such
+as `ValueError: boom`, and the same `stdout` and `stderr` attributes. The
+command line tool prints both before reporting the failure.
+
+`ex.exit_code` is the exit status of the MicroPython VM when the failure is
+that the VM exited: `1` for an uncaught exception in `run()`, or the argument
+of `sys.exit()`. It is `None` for traps, timeouts and every other error.
 
 ## Filesystem Access
 
@@ -522,6 +585,8 @@ The host configures these Wasmtime controls for each execution:
 - `Store.set_limits(memory_size=...)` limits WebAssembly linear memory.
 - `Store.set_fuel(...)` limits CPU-like instruction progress.
 - Epoch interruption is enabled when `wall_timeout_seconds` is not `None`.
+- WASI `poll_oneoff`, which `time.sleep()` and `select.poll()` are built on, is
+  replaced with a host implementation that stops at the wall-clock deadline.
 - `Config.max_wasm_stack` is set to `512 * 1024`.
 
 Example:
@@ -537,6 +602,68 @@ try:
     )
 except MicroPythonWasmError as ex:
     print("stopped:", ex)
+```
+
+Fuel is not consumed while the guest is blocked, so the wall-clock timeout is
+the only limit on sleeping. With `wall_timeout_seconds=None` a guest can call
+`time.sleep()` for as long as it likes and the call into this package will not
+return until it wakes.
+
+### Memory
+
+`memory_bytes` is the most WebAssembly linear memory the guest may have. The
+default is 4 MB (`DEFAULT_MEMORY_BYTES`).
+
+MicroPython allocates its garbage-collected heap once, at startup, so this
+package sizes the heap to fill the limit by passing MicroPython's
+`-X heapsize=` option. The heap gets `memory_bytes` minus:
+
+- 384 KB reserved for the MicroPython runtime: its static data, C stack and
+  libc. The bundled artifact uses 197 KB of that.
+- The size of the code being run, which is copied into guest memory.
+
+With the default limit that is a heap of about 3.6 MB. A `MicroPythonSession`
+also keeps a buffer of `host_result_bytes` (256 KB by default) on the heap for
+host function results.
+
+Guest code that needs more than the heap gets an ordinary `MemoryError`, which
+it can catch. `memory_bytes` must be at least 512 KB plus the size of the
+code; anything smaller raises `ValueError`.
+
+Earlier releases left the heap at MicroPython's default of 1 MB whatever
+`memory_bytes` was, with a default limit of 16 MB that guests could never
+reach.
+
+A custom artifact passed as `wasm_path` must accept the `-X heapsize=` option,
+as any build of MicroPython's Unix port does.
+
+#### Memory and fuel
+
+A bigger heap needs a bigger fuel budget, because the work MicroPython does to
+manage memory is charged as fuel like any other guest code. Measured with the
+bundled artifact:
+
+- An automatic garbage collection costs about 3.5 million fuel per megabyte of
+  garbage it sweeps, and about 11 million per megabyte of live data it marks.
+  It is charged to whichever run happens to trigger it.
+- `gc.mem_free()` and `gc.mem_alloc()` walk the whole heap, at about 5 million
+  fuel per megabyte of heap each.
+- Filling memory is not free either: `bytearray(8 * 1024 * 1024)` costs about
+  40 million fuel.
+
+The defaults are chosen together. Sweeping a default heap full of garbage costs
+about 15 million of the default 35 million fuel. If you raise `memory_bytes`,
+raise `fuel` in proportion, or a collection can use up a run's whole budget:
+
+```python
+from micropython_wasm import run
+
+result = run(
+    "data = bytearray(8 * 1024 * 1024)\nprint(len(data))",
+    memory_bytes=16 * 1024 * 1024,
+    fuel=140_000_000,
+)
+print(result.stdout)  # 8388608
 ```
 
 `memory_bytes` limits guest linear memory, not total host process RSS. Wasmtime
@@ -630,10 +757,14 @@ It:
    `pull/13676/head`.
 3. Builds `mpy-cross`.
 4. Runs `make submodules` for `ports/unix`.
-5. Builds `ports/unix VARIANT=wasi`.
+5. Builds `ports/unix VARIANT=wasi` with `STRIP=`, so the binary keeps its
+   name section until the Binaryen passes have run.
 6. Includes the bundled `host` user C module by default.
-7. Finds the best wasm artifact.
-8. Copies it to `micropython_wasm/artifacts/micropython-wasi.wasm`.
+7. Strips the result with `wasm-opt --strip-debug --strip-producers`.
+8. Finds the best wasm artifact.
+9. Copies it to `micropython_wasm/artifacts/micropython-wasi.wasm`.
+
+The build needs `wasi-sdk` 25.0 and Binaryen's `wasm-opt` on `PATH`.
 
 ### macOS ARM64 Setup
 
@@ -677,6 +808,28 @@ uv run python scripts/build_micropython_wasi.py \
   --wasi-sdk /tmp/wasi-sdk-25.0-arm64-macos
 ```
 
+### Linux x86_64 Setup
+
+Download `wasi-sdk` 25.0 and Binaryen, then put `wasm-opt` on `PATH`:
+
+```bash
+curl -L -o /tmp/wasi-sdk-25.0-x86_64-linux.tar.gz \
+  https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+tar -xzf /tmp/wasi-sdk-25.0-x86_64-linux.tar.gz -C /tmp
+curl -L -o /tmp/binaryen-version_130-x86_64-linux.tar.gz \
+  https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz
+tar -xzf /tmp/binaryen-version_130-x86_64-linux.tar.gz -C /tmp
+export PATH="/tmp/binaryen-version_130/bin:$PATH"
+```
+
+Build the artifact:
+
+```bash
+uv run python scripts/build_micropython_wasi.py \
+  --ref pull/13676/head \
+  --wasi-sdk /tmp/wasi-sdk-25.0-x86_64-linux
+```
+
 ### Useful Build Options
 
 - `--repo-url`: alternate MicroPython repository.
@@ -700,20 +853,30 @@ the experimental branch currently trips this Apple Clang warning while using
 
 The script prefers artifacts in this order:
 
-1. `build-wasi/micropython.spilled.exnref`
-2. `build-wasi/micropython.exnref`
+1. `build-wasi/micropython.spilled.exnref.stripped`
+2. `build-wasi/micropython.spilled.exnref`
 3. `build-wasi/micropython.wasm`
 4. `build-wasi/micropython`
 
-The current local build produced:
+A WASI build produces:
 
 ```text
 /tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython
-/tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython.exnref
+/tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython.spilled
+/tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython.spilled.exnref
+/tmp/micropython-wasm-build/micropython/ports/unix/build-wasi/micropython.spilled.exnref.stripped
 micropython_wasm/artifacts/micropython-wasi.wasm
 ```
 
-The copied package artifact is the `micropython.exnref` output.
+The copied package artifact is the `micropython.spilled.exnref.stripped`
+output.
+
+`build-wasi/micropython.exnref`, the result of translating exceptions without
+running `--spill-pointers` first, is never selected. WASI gives MicroPython no
+way to scan WebAssembly locals for garbage collection roots, so the upstream
+build relies on `wasm-opt --spill-pointers` to copy them to the linear memory
+stack. An artifact built without that pass corrupts itself the first time a
+collection happens inside a `try` block.
 
 ## Testing
 
@@ -775,8 +938,10 @@ micropython_wasm/artifacts/micropython-wasi.wasm
 ```
 
 That artifact was built from MicroPython PR `#13676`, using the PR ref
-`pull/13676/head`. MicroPython's WASI Unix variant is still experimental
-upstream, so this package should also be treated as experimental.
+`pull/13676/head` at commit `3f6d144cb8eeb8e8bd9fceab525c2e80fbf4b36b`, with
+`wasi-sdk` 25.0 and Binaryen 130 on Linux x86_64. MicroPython's WASI Unix
+variant is still experimental upstream, so this package should also be treated
+as experimental.
 
 The test suite verifies the bundled artifact against arithmetic, strings,
 bytes, collections, comprehensions, functions, closures, recursion, classes,
@@ -785,12 +950,20 @@ isolation, read-only file access, and fuel interruption. It also verifies both
 stateful session APIs: the transcript-backed `MicroPythonReplaySession` and the
 persistent background-thread `MicroPythonSession`.
 
-One important build caveat: the PR's full post-link Binaryen pipeline currently
-fails here at `wasm-opt --spill-pointers` with Binaryen 130. The artifact in this
-repository uses the successful `wasm-opt --translate-to-exnref` postprocess
-instead. Simple and moderately broad Python execution works under Wasmtime, but
-this should be stress-tested before relying on it for hostile or long-running
-code.
+One important build caveat: `wasm-opt --spill-pointers` fails with
+`getStackSpace: failed to find the stack pointer` if the linked binary has
+already been stripped, because Binaryen locates `__stack_pointer` through the
+name section. The build script therefore passes `STRIP=` to the MicroPython
+build and strips the artifact itself after the Binaryen passes. Earlier
+releases of this package shipped an artifact that skipped `--spill-pointers`,
+which crashed persistent sessions as soon as the garbage collector ran.
+
+The spilled artifact executes more WebAssembly instructions for the same Python
+code, so a given `fuel` budget goes less far than it did with the earlier
+artifact. Across a mix of small workloads the same code used between 1% and 65%
+more fuel, 36% on average, with tight interpreter loops at the high end. The
+default budget was raised from 20,000,000 to 35,000,000 to compensate, so code
+that fitted in the old default still fits.
 
 ## License
 

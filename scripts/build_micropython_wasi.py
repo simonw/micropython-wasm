@@ -19,6 +19,8 @@ DEFAULT_OUTPUT = (
 DEFAULT_USER_C_MODULES = (
     Path(__file__).resolve().parents[1] / "micropython_wasm" / "usercmodule"
 )
+SPILLED_ARTIFACT_NAME = "micropython.spilled.exnref"
+STRIPPED_ARTIFACT_NAME = "micropython.spilled.exnref.stripped"
 
 
 class BuildError(RuntimeError):
@@ -65,6 +67,15 @@ def build_micropython(
         mpy_cross_args.append("CFLAGS_EXTRA=-Wno-error=gnu-folding-constant")
     run_command(["make", "-C", str(repo_dir / "mpy-cross"), job_arg, *mpy_cross_args])
     unix_make_args = [f"VARIANT={variant}", *extra_make_args]
+    if variant == "wasi" and not any(
+        arg.startswith("STRIP=") for arg in extra_make_args
+    ):
+        # MicroPython's GC can only see pointers held in WebAssembly locals
+        # after "wasm-opt --spill-pointers" has copied them to the linear
+        # memory stack. That pass locates the stack pointer through the name
+        # section, so the binary must not be stripped before it runs. The
+        # final artifact is stripped by strip_wasm_artifact() instead.
+        unix_make_args.append("STRIP=")
     if wasi_sdk is not None:
         unix_make_args.append(f"WASI_SDK={wasi_sdk}")
     if user_c_modules is not None:
@@ -74,31 +85,39 @@ def build_micropython(
         ["make", "-C", str(repo_dir / "ports" / "unix"), "submodules", *unix_make_args]
     )
     unix_dir = repo_dir / "ports" / "unix"
-    try:
-        run_command(
-            [
-                "make",
-                "-C",
-                str(unix_dir),
-                job_arg,
-                *unix_make_args,
-            ]
+    run_command(
+        [
+            "make",
+            "-C",
+            str(unix_dir),
+            job_arg,
+            *unix_make_args,
+        ]
+    )
+    if variant == "wasi":
+        strip_wasm_artifact(
+            unix_dir / f"build-{variant}" / SPILLED_ARTIFACT_NAME,
+            unix_dir / f"build-{variant}" / STRIPPED_ARTIFACT_NAME,
         )
-    except subprocess.CalledProcessError:
-        raw_artifact = unix_dir / f"build-{variant}" / "micropython"
-        if variant != "wasi" or not raw_artifact.exists():
-            raise
-        translated_artifact = raw_artifact.with_suffix(".exnref")
-        run_command(
-            [
-                "wasm-opt",
-                "--translate-to-exnref",
-                "--enable-exception-handling",
-                "-o",
-                str(translated_artifact),
-                str(raw_artifact),
-            ]
+
+
+def strip_wasm_artifact(source: Path, output: Path) -> None:
+    if not source.is_file():
+        raise BuildError(
+            f"Expected {source} after the build. That is the output of "
+            "wasm-opt --spill-pointers, which the MicroPython garbage collector "
+            "needs in order to run safely under WASI."
         )
+    run_command(
+        [
+            "wasm-opt",
+            "--strip-debug",
+            "--strip-producers",
+            "-o",
+            str(output),
+            str(source),
+        ]
+    )
 
 
 def is_wasm_file(path: Path) -> bool:
@@ -110,9 +129,11 @@ def is_wasm_file(path: Path) -> bool:
 
 
 def find_wasm_artifact(repo_dir: Path, variant: str) -> Path:
+    # micropython.exnref is deliberately not a candidate: it is what you get by
+    # skipping --spill-pointers, and it crashes when the garbage collector runs.
     candidates = [
-        repo_dir / "ports" / "unix" / f"build-{variant}" / "micropython.spilled.exnref",
-        repo_dir / "ports" / "unix" / f"build-{variant}" / "micropython.exnref",
+        repo_dir / "ports" / "unix" / f"build-{variant}" / STRIPPED_ARTIFACT_NAME,
+        repo_dir / "ports" / "unix" / f"build-{variant}" / SPILLED_ARTIFACT_NAME,
         repo_dir / "ports" / "unix" / f"build-{variant}" / "micropython.wasm",
         repo_dir / "ports" / "unix" / f"build-{variant}" / "micropython",
     ]
