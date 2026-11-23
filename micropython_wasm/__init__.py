@@ -680,7 +680,7 @@ class MicroPythonSession:
             except _WallTimeoutExceeded as exc:
                 raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
             except Trap as exc:
-                raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
+                raise _trap_error(exc) from exc
             except WasmtimeError as exc:
                 raise MicroPythonWasmError(f"wasmtime error: {exc}") from exc
         finally:
@@ -948,7 +948,7 @@ def run_micropython_wasi(
         except _WallTimeoutExceeded as exc:
             raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
         except Trap as exc:
-            raise MicroPythonWasmError(f"guest trapped: {exc}") from exc
+            raise _trap_error(exc) from exc
         except WasmtimeError as exc:
             raise MicroPythonWasmError(f"wasmtime error: {exc}") from exc
         finally:
@@ -967,6 +967,24 @@ def run_micropython_wasi(
         stderr=captured(stderr_parts),
         fuel_remaining=store.get_fuel(),
     )
+
+
+def _trap_error(trap) -> MicroPythonWasmError:
+    """
+    Describe a Wasmtime trap.
+
+    The wall timeout stops a guest in one of two ways: an epoch interrupt if it
+    is executing WebAssembly, or _WallTimeoutExceeded if it is blocked in the
+    host. A guest that alternates between the two, as select.poll() does, can
+    be caught by either, so both are reported with the same words.
+    """
+
+    from wasmtime import TrapCode
+
+    if trap.trap_code is TrapCode.INTERRUPT:
+        # Epoch interruption is only ever triggered by the wall timeout timer.
+        return MicroPythonWasmError("guest trapped: wall-clock timeout exceeded")
+    return MicroPythonWasmError(f"guest trapped: {trap}")
 
 
 _WASM_PAGE_BYTES = 64 * 1024

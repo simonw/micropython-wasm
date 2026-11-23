@@ -355,8 +355,12 @@ def test_garbage_collection_inside_try_block_does_not_corrupt_vm(code):
 @pytest.mark.parametrize(
     "code",
     [
+        # One long call into the host.
         "import time\ntime.sleep(30)",
+        # Many short calls into the host with WebAssembly code in between, so
+        # the deadline can arrive in either place.
         "import select\nselect.poll().poll(30000)",
+        "import time\nwhile True:\n    time.sleep_ms(1)",
     ],
 )
 def test_wall_timeout_interrupts_blocking_guest(code):
@@ -555,3 +559,12 @@ def test_memory_bytes_too_small_for_runtime_and_code_is_rejected():
 
     result = run("print(1)", memory_bytes=524288, wall_timeout_seconds=None)
     assert result.stdout == "1\n"
+
+
+def test_wall_timeout_reports_the_same_error_for_executing_guest():
+    # A guest that never calls into the host is stopped by epoch interruption
+    # rather than by a blocking call noticing the deadline.
+    with pytest.raises(MicroPythonWasmError) as info:
+        run("while True:\n    pass", fuel=10**12, wall_timeout_seconds=0.3)
+
+    assert str(info.value) == "guest trapped: wall-clock timeout exceeded"

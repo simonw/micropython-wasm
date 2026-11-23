@@ -395,9 +395,12 @@ def test_persistent_session_wall_timeout_allows_successful_runs():
 
 
 def test_persistent_session_wall_timeout_interrupts_infinite_loop():
-    session = MicroPythonSession(wall_timeout_seconds=0.05)
+    # Plenty of fuel, so it is the timeout and not the fuel that stops the loop.
+    session = MicroPythonSession(wall_timeout_seconds=0.05, fuel=10**12)
     try:
-        with pytest.raises(MicroPythonWasmError, match="guest trapped"):
+        with pytest.raises(
+            MicroPythonWasmError, match="guest trapped: wall-clock timeout exceeded"
+        ):
             session.run("while True:\n    pass")
         assert session._thread_error is not None
         assert session._thread_error.__traceback__ is None
