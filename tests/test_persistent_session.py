@@ -196,6 +196,141 @@ def test_persistent_session_waiting_run_is_released_when_session_closes():
     assert isinstance(outcome["error"], MicroPythonSessionClosed)
 
 
+# Guest code that calls the session's own control function directly, the way
+# the bootstrap loop does, and returns what the host sent back.
+CALL_SESSION_CONTROL = """
+import host as _host, json as _json
+
+def _session_control(payload):
+    return _json.loads(_host.call("__session_exchange__", payload))
+"""
+
+REPORT_SUCCESS = """'{"args": [{"ok": true}], "kwargs": {}}'"""
+
+
+def test_guest_calling_session_control_cannot_stall_or_desynchronise_run():
+    session = MicroPythonSession()
+    try:
+        # The guest ends its own request early and swallows the next one.
+        first = run_with_deadline(
+            session,
+            CALL_SESSION_CONTROL
+            + f"""
+print("before")
+_message = _session_control({REPORT_SUCCESS})["value"]
+print("after", _message["op"], sorted(_message))
+""",
+        )
+        assert first.stdout == "before\n"
+
+        # Everything the guest prints while this request is in flight belongs
+        # to it. Nothing printed during the first request leaks in, and the
+        # guest was not given a request id to forge a reply with.
+        second = run_with_deadline(session, "print('never executed')")
+        assert second.stdout == "after run ['code', 'op']\n"
+
+        # The bootstrap loop is back in step afterwards.
+        third = run_with_deadline(session, "print('third')")
+        assert third.stdout == "third\n"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "'{}'",
+        """'{"args": [], "kwargs": {}}'""",
+        """'{"args": ["not a result"], "kwargs": {}}'""",
+        """'{"args": [{"ok": 1}], "kwargs": {}}'""",
+    ],
+)
+def test_guest_calling_session_control_without_a_result_fails_that_run(payload):
+    session = MicroPythonSession()
+    try:
+        with pytest.raises(
+            MicroPythonWasmError, match="ended the request without reporting a result"
+        ):
+            run_with_deadline(
+                session, CALL_SESSION_CONTROL + f"_session_control({payload})"
+            )
+    finally:
+        session.close()
+
+
+def test_guest_calling_session_control_with_bad_arguments_changes_nothing():
+    session = MicroPythonSession()
+    try:
+        result = run_with_deadline(
+            session,
+            CALL_SESSION_CONTROL
+            + """
+_response = _session_control('{"args": [1, 2, 3], "kwargs": {}}')
+print(_response["ok"], _response["error"].split(":")[0])
+""",
+        )
+        assert result.stdout == "False TypeError\n"
+        assert run_with_deadline(session, "print('next')").stdout == "next\n"
+    finally:
+        session.close()
+
+
+def test_guest_calling_session_control_stays_inside_resource_limits():
+    session = MicroPythonSession()
+    try:
+        # The guest takes over the next request and then spins. The fuel budget
+        # restarts when that request is delivered, so it is still enforced.
+        run_with_deadline(
+            session,
+            CALL_SESSION_CONTROL
+            + f"""
+_session_control({REPORT_SUCCESS})
+while True:
+    pass
+""",
+        )
+        with pytest.raises(MicroPythonWasmError, match="all fuel consumed"):
+            run_with_deadline(session, "print('never executed')")
+    finally:
+        session.close()
+
+
+def test_guest_calling_session_control_cannot_block_close():
+    session = MicroPythonSession()
+    # The guest swallows the close message and then asks for more work.
+    run_with_deadline(
+        session,
+        CALL_SESSION_CONTROL
+        + f"""
+print(_session_control({REPORT_SUCCESS})["value"]["op"])
+_session_control({REPORT_SUCCESS})
+print("still running")
+""",
+    )
+
+    closer = threading.Thread(target=session.close, daemon=True)
+    closer.start()
+    closer.join(30)
+
+    assert not closer.is_alive(), "session.close() did not return"
+    assert session._thread is not None
+    assert not session._thread.is_alive()
+
+
+def test_session_control_function_name_is_reserved():
+    session = MicroPythonSession()
+    try:
+        with pytest.raises(ValueError, match="reserved"):
+            session.register_function(lambda: None, name="__session_exchange__")
+        with pytest.raises(ValueError, match="reserved"):
+            MicroPythonSession(host_functions={"__session_exchange__": lambda: None})
+
+        # The loop still works, and is still driven by the real control function.
+        assert session.run("print(1)").stdout == "1\n"
+    finally:
+        session.close()
+
+
 def test_persistent_session_host_function_exception_can_be_caught():
     def fail():
         raise ValueError("bad host value")

@@ -49,40 +49,49 @@ def default_wasm_path() -> Path:
     return Path(__file__).parent / "artifacts" / "micropython-wasi.wasm"
 
 
+# Name of the host function the session bootstrap loop uses to report the
+# outcome of one snippet and wait for the next. Guest code can call it too, so
+# the host side (MicroPythonSession._session_exchange) never trusts what the
+# guest says about which request it is answering.
+_SESSION_CONTROL_FUNCTION = "__session_exchange__"
+
 _THREAD_BOOTSTRAP = r"""
 import host as __micropython_wasm_host
 import json as __micropython_wasm_json
 
-def __micropython_wasm_call(name, *args, **kwargs):
-    payload = __micropython_wasm_json.dumps({"args": args, "kwargs": kwargs})
-    response = __micropython_wasm_json.loads(__micropython_wasm_host.call(name, payload))
+def __micropython_wasm_exchange(result):
+    payload = __micropython_wasm_json.dumps({"args": [result], "kwargs": {}})
+    response = __micropython_wasm_json.loads(
+        __micropython_wasm_host.call("__session_exchange__", payload)
+    )
     if not response.get("ok"):
         raise RuntimeError(response.get("error", "host function failed"))
     return response.get("value")
 
+__micropython_wasm_result = None
 while True:
-    __micropython_wasm_message = __micropython_wasm_call("__session_next__")
+    __micropython_wasm_message = __micropython_wasm_exchange(__micropython_wasm_result)
     if __micropython_wasm_message.get("op") == "close":
         break
 
-    __micropython_wasm_request_id = __micropython_wasm_message["id"]
-    __micropython_wasm_code = __micropython_wasm_message["code"]
     try:
-        exec(__micropython_wasm_code, globals())
-        __micropython_wasm_call(
-            "__session_result__",
-            {"id": __micropython_wasm_request_id, "ok": True},
-        )
+        exec(__micropython_wasm_message["code"], globals())
+        __micropython_wasm_result = {"ok": True}
     except Exception as __micropython_wasm_ex:
-        __micropython_wasm_call(
-            "__session_result__",
-            {
-                "id": __micropython_wasm_request_id,
-                "ok": False,
-                "error": type(__micropython_wasm_ex).__name__ + ": " + str(__micropython_wasm_ex),
-            },
-        )
+        __micropython_wasm_result = {
+            "ok": False,
+            "error": type(__micropython_wasm_ex).__name__ + ": " + str(__micropython_wasm_ex),
+        }
 """
+
+
+class _SessionTerminated(BaseException):
+    """
+    Raised inside a host callback to stop a guest that is no longer wanted.
+
+    It derives from BaseException so the host callback bridge does not turn it
+    into an error value for the guest. Wasmtime converts it into a trap.
+    """
 
 
 class MicroPythonReplaySession:
@@ -245,6 +254,9 @@ class MicroPythonSession:
         self._store = None
         self._timeout_timer: threading.Timer | None = None
         self._thread_host_functions: dict[str, Callable[..., object]] | None = None
+        # Only touched by the session thread, inside _session_exchange().
+        self._inflight_request_id: str | None = None
+        self._close_delivered = False
         for name, func in (host_functions or {}).items():
             self.register_function(func, name=name)
 
@@ -274,6 +286,8 @@ class MicroPythonSession:
             raise ValueError(
                 f"host function name is not a valid Python identifier: {name!r}"
             )
+        if name == _SESSION_CONTROL_FUNCTION:
+            raise ValueError(f"host function name is reserved: {name!r}")
 
         wrapper = _host_function_wrapper_code(name)
         with self._callback_lock:
@@ -480,12 +494,11 @@ class MicroPythonSession:
 
         linker = Linker(engine)
         linker.define_wasi()
-        host_functions: dict[str, Callable[..., object]] = {
-            "__session_next__": self._session_next,
-            "__session_result__": self._session_result,
-        }
         with self._callback_lock:
-            host_functions.update(self._host_functions)
+            host_functions: dict[str, Callable[..., object]] = dict(
+                self._host_functions
+            )
+            host_functions[_SESSION_CONTROL_FUNCTION] = self._session_exchange
             self._thread_host_functions = host_functions
         _define_host_call(
             linker,
@@ -525,19 +538,43 @@ class MicroPythonSession:
                 self._store = None
                 self._thread_host_functions = None
 
-    def _session_next(self) -> dict[str, object]:
+    def _session_exchange(self, result: object = None) -> dict[str, object]:
+        """
+        Report the outcome of the request in flight, then wait for the next.
+
+        The bootstrap loop calls this once per snippet, but untrusted guest
+        code can call it as well, with any argument and at any time. So the
+        host decides which request a call answers: it is always the one in
+        flight, and the guest is never asked for a request id. Whoever calls,
+        the waiting run() is released, and the guest then stays blocked here
+        until another run() arrives and restarts the fuel and wall-clock
+        limits. A guest cannot use this to stall run(), to keep executing
+        outside those limits, or to have its output attributed to a later run.
+        """
+
+        if self._close_delivered:
+            # The guest was already told to close and nothing more will ever be
+            # queued for it, so waiting again would block close() forever.
+            raise _SessionTerminated("guest kept running after the session closed")
+
+        request_id = self._inflight_request_id
+        if request_id is not None:
+            self._inflight_request_id = None
+            self._cancel_wall_timeout_timer()
+            self._result_queue.put(_session_result_message(request_id, result))
+
         request = self._request_queue.get()
-        if request.get("op") == "run" and self._store is not None:
+        if request.get("op") != "run":
+            self._close_delivered = True
+            return {"op": "close"}
+
+        self._inflight_request_id = str(request["id"])
+        if self._store is not None:
             self._store.set_fuel(self.fuel)
             if self.wall_timeout_seconds is not None:
                 self._store.set_epoch_deadline(1)
                 self._start_wall_timeout_timer()
-        return request
-
-    def _session_result(self, result: dict[str, object]) -> None:
-        self._cancel_wall_timeout_timer()
-        self._result_queue.put(result)
-        return None
+        return {"op": "run", "code": request["code"]}
 
     def _start_wall_timeout_timer(self) -> None:
         self._cancel_wall_timeout_timer()
@@ -557,6 +594,17 @@ class MicroPythonSession:
         timer.cancel()
         if timer is not threading.current_thread():
             timer.join()
+
+
+def _session_result_message(request_id: str, result: object) -> dict[str, object]:
+    """Build the reply for run() from an untrusted, guest-supplied result."""
+
+    if isinstance(result, dict) and result.get("ok") is True:
+        return {"id": request_id, "ok": True}
+    error = result.get("error") if isinstance(result, dict) else None
+    if not isinstance(error, str):
+        error = "guest ended the request without reporting a result"
+    return {"id": request_id, "ok": False, "error": error}
 
 
 def _marker_code(marker: str) -> str:

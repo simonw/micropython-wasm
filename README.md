@@ -398,6 +398,9 @@ session = MicroPythonSession(
 print(session.run("print(format_name('Ada', last='Lovelace', uppercase=True))").stdout)
 ```
 
+The name `__session_exchange__` is reserved for the session's own control
+channel and cannot be registered with `MicroPythonSession`.
+
 Arguments and return values cross the WebAssembly boundary as JSON. Supported
 values are therefore JSON-compatible values: `None`, booleans, numbers, strings,
 lists, and dictionaries with string keys.
